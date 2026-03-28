@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-03-28
+
 ### Added
 
 - Optional local outbound TTS provider support for `ResembleAI/chatterbox-turbo`.
