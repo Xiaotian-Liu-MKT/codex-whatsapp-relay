@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { resolvePermissionLevel } from "./controller-permissions.mjs";
 import { authDir, controllerConfigFile, repoRoot } from "./paths.mjs";
+import { normalizeTtsProvider } from "./voice-replier.mjs";
 
 function digitsOnly(value) {
   return String(value ?? "").replace(/\D+/g, "");
@@ -65,6 +66,8 @@ function defaultConfig() {
     permissionLevel: "workspace-write",
     search: false,
     captureAllDirectMessages: true,
+    ttsProvider: "system",
+    ttsChatterboxAllowNonEnglish: false,
     allowedControllers: []
   };
 }
@@ -77,6 +80,8 @@ function normalizeConfig(config = {}) {
 
   delete merged.fullAuto;
   merged.permissionLevel = resolvePermissionLevel(merged.permissionLevel);
+  merged.ttsProvider = normalizeTtsProvider(merged.ttsProvider, "system");
+  merged.ttsChatterboxAllowNonEnglish = merged.ttsChatterboxAllowNonEnglish === true;
 
   const seen = new Set();
   merged.allowedControllers = (merged.allowedControllers ?? [])

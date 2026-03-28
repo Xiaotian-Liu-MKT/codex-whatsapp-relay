@@ -144,6 +144,8 @@ Provider selection is controlled with environment variables:
 - `WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH=1` disables the default system fallback for non-English replies. By default Turbo is treated as English-first and the bridge falls back to macOS `say` for replies that look Spanish.
 - `WHATSAPP_RELAY_TTS_TIMEOUT_MS` extends or reduces the outbound TTS timeout for either provider.
 
+If you want the controller bridge to keep using Chatterbox across restarts, persist it in the bridge config. `whatsapp_start_controller_bridge` accepts `ttsProvider` and `ttsChatterboxAllowNonEnglish`, stores them in `plugins/whatsapp-relay/data/controller-config.json`, and reuses them for future daemon starts.
+
 To install Chatterbox Turbo locally:
 
 ```bash

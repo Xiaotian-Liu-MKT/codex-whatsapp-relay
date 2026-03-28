@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { ControllerConfigStore } from "./controller-config.mjs";
 import { ControllerStateStore } from "./controller-state.mjs";
 import {
   controllerDaemonScript,
@@ -21,6 +22,15 @@ function isPidRunning(pid) {
   } catch {
     return false;
   }
+}
+
+export function controllerDaemonEnv(config = {}, baseEnv = process.env) {
+  return {
+    ...baseEnv,
+    WHATSAPP_RELAY_TTS_PROVIDER: config.ttsProvider ?? "system",
+    WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH:
+      config.ttsChatterboxAllowNonEnglish ? "1" : "0"
+  };
 }
 
 export async function getControllerProcessStatus() {
@@ -47,10 +57,13 @@ export async function startControllerDaemon() {
     return current;
   }
 
+  const configStore = new ControllerConfigStore();
+  const config = await configStore.load();
   const logHandle = await fs.open(controllerLogFile, "a");
   const child = spawn(process.execPath, [controllerDaemonScript], {
     cwd: repoRoot,
     detached: true,
+    env: controllerDaemonEnv(config),
     stdio: ["ignore", logHandle.fd, logHandle.fd]
   });
 

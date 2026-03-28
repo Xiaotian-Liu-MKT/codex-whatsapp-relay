@@ -15,6 +15,7 @@ import {
 } from "./controller-process.mjs";
 import { credsFile, storeFile } from "./paths.mjs";
 import { WhatsAppRuntime } from "./runtime.mjs";
+import { normalizeTtsProvider } from "./voice-replier.mjs";
 
 const runtime = new WhatsAppRuntime({
   logLevel: process.env.WHATSAPP_LOG_LEVEL ?? "warn"
@@ -96,6 +97,8 @@ function controllerSummaryLines(config, processStatus) {
     `codex_bin: ${config.codexBin}`,
     `default_permission_level: ${config.permissionLevel}`,
     `capture_all_direct_messages: ${config.captureAllDirectMessages ? "yes" : "no"}`,
+    `tts_provider: ${config.ttsProvider}`,
+    `tts_chatterbox_allow_non_english: ${config.ttsChatterboxAllowNonEnglish ? "yes" : "no"}`,
     `allowed_controller_count: ${config.allowedControllers.length}`
   ];
 
@@ -326,7 +329,9 @@ server.tool(
     profile: z.string().min(1).optional(),
     permissionLevel: z.string().min(1).optional(),
     search: z.boolean().optional(),
-    captureAllDirectMessages: z.boolean().optional()
+    captureAllDirectMessages: z.boolean().optional(),
+    ttsProvider: z.string().min(1).optional(),
+    ttsChatterboxAllowNonEnglish: z.boolean().optional()
   },
   async ({
     workspace,
@@ -334,7 +339,9 @@ server.tool(
     profile,
     permissionLevel,
     search,
-    captureAllDirectMessages
+    captureAllDirectMessages,
+    ttsProvider,
+    ttsChatterboxAllowNonEnglish
   }) => {
     try {
       if (!runtime.hasSavedCreds()) {
@@ -349,6 +356,10 @@ server.tool(
         );
       }
 
+      if (ttsProvider && normalizeTtsProvider(ttsProvider, null) === null) {
+        throw new Error("Unknown ttsProvider. Use system or chatterbox-turbo.");
+      }
+
       const config = await controllerConfigStore.update({
         enabled: true,
         ...(workspace ? { workspace } : {}),
@@ -360,6 +371,10 @@ server.tool(
         ...(typeof search === "boolean" ? { search } : {}),
         ...(typeof captureAllDirectMessages === "boolean"
           ? { captureAllDirectMessages }
+          : {}),
+        ...(ttsProvider ? { ttsProvider: normalizeTtsProvider(ttsProvider, "system") } : {}),
+        ...(typeof ttsChatterboxAllowNonEnglish === "boolean"
+          ? { ttsChatterboxAllowNonEnglish }
           : {})
       });
 
