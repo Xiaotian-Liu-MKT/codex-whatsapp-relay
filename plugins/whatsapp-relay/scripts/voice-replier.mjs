@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { franc } from "franc";
 import { pluginRoot } from "./paths.mjs";
 
 export const DEFAULT_VOICE_REPLY_SPEED = "1x";
@@ -27,6 +28,44 @@ const CHATTERBOX_AUDIO_PROMPT = String(
   process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_AUDIO_PROMPT ?? ""
 ).trim();
 const CHATTERBOX_TTS_SCRIPT = path.join(pluginRoot, "scripts", "chatterbox_tts.py");
+const CHATTERBOX_FRANC_LANGUAGE_IDS = new Map([
+  ["ara", "ar"],
+  ["arb", "ar"],
+  ["cmn", "zh"],
+  ["dan", "da"],
+  ["deu", "de"],
+  ["ell", "el"],
+  ["eng", "en"],
+  ["fin", "fi"],
+  ["fra", "fr"],
+  ["heb", "he"],
+  ["hin", "hi"],
+  ["ita", "it"],
+  ["jpn", "ja"],
+  ["kor", "ko"],
+  ["msa", "ms"],
+  ["zsm", "ms"],
+  ["nld", "nl"],
+  ["nno", "no"],
+  ["nob", "no"],
+  ["nor", "no"],
+  ["pol", "pl"],
+  ["por", "pt"],
+  ["rus", "ru"],
+  ["spa", "es"],
+  ["swa", "sw"],
+  ["swe", "sv"],
+  ["tur", "tr"],
+  ["zho", "zh"]
+]);
+const CHATTERBOX_SUPPORTED_LANGUAGE_IDS = new Set(CHATTERBOX_FRANC_LANGUAGE_IDS.values());
+const CHATTERBOX_LANGUAGE_ALIASES = new Map([
+  ...CHATTERBOX_FRANC_LANGUAGE_IDS.entries(),
+  ...[...CHATTERBOX_SUPPORTED_LANGUAGE_IDS].map((languageId) => [languageId, languageId]),
+  ["iw", "he"],
+  ["nb", "no"],
+  ["nn", "no"]
+]);
 
 let voiceCachePromise = null;
 
@@ -85,25 +124,21 @@ function normalizeChatterboxDevice(value, fallback = "auto") {
   return fallback;
 }
 
-export function resolveEffectiveTtsProvider(provider, locale) {
+export function resolveEffectiveTtsProvider(provider, languageId) {
   const normalizedProvider = normalizeTtsProvider(provider, DEFAULT_TTS_PROVIDER);
+  if (normalizedProvider === "chatterbox-turbo" && !languageId) {
+    return "system";
+  }
+
   if (
     normalizedProvider === "chatterbox-turbo" &&
-    locale !== "en" &&
+    languageId !== "en" &&
     !isTruthyEnv(process.env.WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH)
   ) {
     return "system";
   }
 
   return normalizedProvider;
-}
-
-function normalizeLocaleSample(text) {
-  return ` ${String(text ?? "")
-    .toLowerCase()
-    .replace(/[?!.,;:()[\]{}"'`]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()} `;
 }
 
 function summarizeCommand(command, args) {
@@ -189,75 +224,39 @@ async function runCommand(command, args, { timeoutMs, cwd, env } = {}) {
   });
 }
 
-function looksSpanish(text) {
-  const lower = normalizeLocaleSample(text);
-  const accents = /[áéíóúñ¿¡]/.test(lower);
-  const spanishMarkers = [
-    " el ",
-    " la ",
-    " los ",
-    " las ",
-    " que ",
-    " para ",
-    " con ",
-    " por ",
-    " una ",
-    " este ",
-    " esta ",
-    " puedes ",
-    " ahora "
-  ];
-  const markerHits = spanishMarkers.filter((marker) => lower.includes(marker)).length;
-  return accents || markerHits >= 2;
-}
+export function normalizeSpeechLanguageId(value) {
+  const raw = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (!raw) {
+    return null;
+  }
 
-function looksEnglish(text) {
-  const lower = normalizeLocaleSample(text);
-  const englishMarkers = [
-    " the ",
-    " and ",
-    " you ",
-    " your ",
-    " this ",
-    " that ",
-    " with ",
-    " for ",
-    " from ",
-    " what ",
-    " how ",
-    " can ",
-    " could ",
-    " would ",
-    " should ",
-    " reply ",
-    " voice ",
-    " summary ",
-    " short ",
-    " answer ",
-    " thanks ",
-    " please ",
-    " hello ",
-    " hi ",
-    " i ",
-    " we ",
-    " it ",
-    " is ",
-    " are "
-  ];
+  const normalized = raw.replace(/_/g, "-");
+  const direct = CHATTERBOX_LANGUAGE_ALIASES.get(normalized);
+  if (direct) {
+    return direct;
+  }
 
-  return englishMarkers.filter((marker) => lower.includes(marker)).length >= 2;
+  const base = normalized.split("-")[0];
+  return CHATTERBOX_LANGUAGE_ALIASES.get(base) ?? null;
 }
 
 export function detectSpeechLocale(text) {
-  if (looksSpanish(text)) {
-    return "es";
+  return detectSpeechLanguageId(text) ?? "other";
+}
+
+export function detectSpeechLanguageId(text) {
+  const sample = String(text ?? "").trim();
+  if (!sample) {
+    return null;
   }
 
-  if (looksEnglish(text)) {
-    return "en";
-  }
-
-  return "other";
+  const detected = franc(sample, {
+    minLength: 10,
+    only: [...CHATTERBOX_FRANC_LANGUAGE_IDS.keys()]
+  });
+  return normalizeSpeechLanguageId(detected);
 }
 
 async function listSystemVoices() {
@@ -336,14 +335,21 @@ async function resolveVoiceName(locale) {
     }
   }
 
-  if (locale !== "es" && locale !== "en") {
-    return null;
-  }
-
-  const exactLocale = locale === "es" ? "es_MX" : "en_US";
-  const exactVoice = voices.find((voice) => voice.locale === exactLocale);
-  if (exactVoice) {
-    return exactVoice.name;
+  const exactLocales =
+    locale === "es"
+      ? ["es_MX", "es_ES"]
+      : locale === "en"
+        ? ["en_US", "en_GB"]
+        : locale === "pt"
+          ? ["pt_BR", "pt_PT"]
+          : locale === "it"
+            ? ["it_IT"]
+            : [];
+  for (const exactLocale of exactLocales) {
+    const exactVoice = voices.find((voice) => voice.locale === exactLocale);
+    if (exactVoice) {
+      return exactVoice.name;
+    }
   }
 
   const languagePrefix = `${locale}_`;
@@ -532,7 +538,7 @@ function resolveChatterboxPython() {
   return explicit || DEFAULT_CHATTERBOX_PYTHON;
 }
 
-function buildChatterboxArgs({ textFile, outputFile, device, audioPromptPath }) {
+function buildChatterboxArgs({ textFile, outputFile, device, audioPromptPath, languageId }) {
   const args = [
     CHATTERBOX_TTS_SCRIPT,
     "--text-file",
@@ -542,6 +548,10 @@ function buildChatterboxArgs({ textFile, outputFile, device, audioPromptPath }) 
     "--device",
     normalizeChatterboxDevice(device, DEFAULT_CHATTERBOX_DEVICE)
   ];
+
+  if (languageId) {
+    args.push("--language-id", languageId);
+  }
 
   if (audioPromptPath) {
     args.push("--audio-prompt-path", audioPromptPath);
@@ -605,7 +615,7 @@ async function synthesizeWithSystemVoice({ spokenText, speed, timeoutMs, locale 
   }
 }
 
-async function synthesizeWithChatterbox({ spokenText, speed, timeoutMs, locale }) {
+async function synthesizeWithChatterbox({ spokenText, speed, timeoutMs, locale, languageId }) {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "whatsapp-relay-chatterbox-"));
   const pythonBin = resolveChatterboxPython();
 
@@ -630,7 +640,8 @@ async function synthesizeWithChatterbox({ spokenText, speed, timeoutMs, locale }
         textFile,
         outputFile: rawAudioFile,
         device: DEFAULT_CHATTERBOX_DEVICE,
-        audioPromptPath: CHATTERBOX_AUDIO_PROMPT
+        audioPromptPath: CHATTERBOX_AUDIO_PROMPT,
+        languageId
       }),
       { timeoutMs }
     );
@@ -649,10 +660,21 @@ async function synthesizeWithChatterbox({ spokenText, speed, timeoutMs, locale }
       audioBuffer,
       seconds,
       locale,
+      languageId,
       device: metadata.device ?? DEFAULT_CHATTERBOX_DEVICE,
-      voice: metadata.voice_mode === "clone" ? "Chatterbox Turbo clone" : "Chatterbox Turbo",
+      voice:
+        metadata.voice_mode === "clone"
+          ? metadata.model === "chatterbox-multilingual"
+            ? "Chatterbox Multilingual clone"
+            : "Chatterbox Turbo clone"
+          : metadata.model === "chatterbox-multilingual"
+            ? "Chatterbox Multilingual"
+            : "Chatterbox Turbo",
       mimetype: "audio/ogg; codecs=opus",
-      provider: "chatterbox-turbo"
+      provider:
+        metadata.model === "chatterbox-multilingual"
+          ? "chatterbox-multilingual"
+          : "chatterbox-turbo"
     };
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
@@ -663,22 +685,26 @@ export async function synthesizeVoiceReply({
   text,
   speed = DEFAULT_VOICE_REPLY_SPEED,
   timeoutMs = DEFAULT_TIMEOUT_MS,
-  provider = DEFAULT_TTS_PROVIDER
+  provider = DEFAULT_TTS_PROVIDER,
+  languageIdHint = null
 }) {
   const spokenText = buildSpokenReplyText(text);
   if (!spokenText) {
     throw new Error("Voice reply text is empty.");
   }
 
-  const locale = detectSpeechLocale(spokenText);
-  const normalizedProvider = resolveEffectiveTtsProvider(provider, locale);
+  const languageId =
+    normalizeSpeechLanguageId(languageIdHint) ?? detectSpeechLanguageId(spokenText);
+  const locale = languageId ?? detectSpeechLocale(spokenText);
+  const normalizedProvider = resolveEffectiveTtsProvider(provider, languageId);
 
   if (normalizedProvider === "chatterbox-turbo") {
     const synthesized = await synthesizeWithChatterbox({
       spokenText,
       speed,
       timeoutMs,
-      locale
+      locale,
+      languageId
     });
     return {
       ...synthesized,

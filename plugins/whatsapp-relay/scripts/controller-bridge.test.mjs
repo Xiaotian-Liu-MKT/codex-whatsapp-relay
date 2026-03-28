@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildVoiceReplyPrompt,
+  extractVoiceReplyEnvelope,
   extractOneShotVoiceReplyRequest,
   parseVoiceReplyCommandPayload,
   normalizeVoiceCommandText,
@@ -162,6 +164,45 @@ test("extractOneShotVoiceReplyRequest accepts transcribed speed variants like on
       }
     }
   );
+});
+
+test("buildVoiceReplyPrompt instructs Codex to emit a hidden reply language tag", () => {
+  const prompt = buildVoiceReplyPrompt("Explain the change.");
+  assert.match(prompt, /\[\[reply_language:<language-code>\]\]/);
+  assert.match(prompt, /for example en, es, it, or pt-BR/i);
+  assert.match(prompt, /do not mention the metadata/i);
+});
+
+test("extractVoiceReplyEnvelope strips the language tag before delivery", () => {
+  assert.deepEqual(
+    extractVoiceReplyEnvelope("[[reply_language:pt-BR]]\nClaro, eu te dou o resumo curto agora."),
+    {
+      text: "Claro, eu te dou o resumo curto agora.",
+      languageId: "pt-br",
+      hasLanguageTag: true
+    }
+  );
+  assert.deepEqual(extractVoiceReplyEnvelope("Plain reply"), {
+    text: "Plain reply",
+    languageId: null,
+    hasLanguageTag: false
+  });
+});
+
+test("extractVoiceReplyEnvelope tolerates whitespace and never falls back to the raw tag", () => {
+  assert.deepEqual(
+    extractVoiceReplyEnvelope(" \n [[ reply_language : es ]] \n Hola."),
+    {
+      text: "Hola.",
+      languageId: "es",
+      hasLanguageTag: true
+    }
+  );
+  assert.deepEqual(extractVoiceReplyEnvelope("[[reply_language:it]]"), {
+    text: "",
+    languageId: "it",
+    hasLanguageTag: true
+  });
 });
 
 test("normalizePermissionLevel accepts short aliases", () => {

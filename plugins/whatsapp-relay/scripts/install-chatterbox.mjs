@@ -123,7 +123,7 @@ async function main() {
     throw lastError ?? new Error("Could not create a Chatterbox virtual environment.");
   }
 
-  console.log(`Using ${python.command} (${python.version}) for Chatterbox Turbo setup.`);
+  console.log(`Using ${python.command} (${python.version}) for Chatterbox setup.`);
   await runCommand(
     venvPython,
     ["-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools<81"],
@@ -141,9 +141,12 @@ async function main() {
     [
       "import importlib.metadata",
       "import torch",
+      "from chatterbox.mtl_tts import ChatterboxMultilingualTTS, SUPPORTED_LANGUAGES",
       "from chatterbox.tts_turbo import ChatterboxTurboTTS",
       "print(f'chatterbox={importlib.metadata.version(\"chatterbox-tts\")}')",
       "print('tts_turbo=ok')",
+      "print('tts_multilingual=ok')",
+      "print(f'multilingual_languages={len(SUPPORTED_LANGUAGES)}')",
       "print(f'torch={torch.__version__}')",
     ].join("; ")
   ], {
@@ -151,11 +154,12 @@ async function main() {
   });
 
   console.log("");
-  console.log("Chatterbox Turbo is installed locally.");
+  console.log("Chatterbox is installed locally.");
   console.log(`Python: ${venvPython}`);
-  console.log("Outbound voice replies now prefer Chatterbox Turbo by default.");
-  console.log("Non-English replies still use the macOS fallback unless you opt in with:");
-  console.log("export WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH=1");
+  console.log("Outbound voice replies now use Chatterbox by default.");
+  console.log("English replies use Turbo, and supported non-English replies use Chatterbox Multilingual.");
+  console.log("If you want the macOS fallback for non-English replies instead:");
+  console.log("export WHATSAPP_RELAY_TTS_CHATTERBOX_ALLOW_NON_ENGLISH=0");
   console.log("If you ever want the macOS fallback everywhere instead:");
   console.log("export WHATSAPP_RELAY_TTS_PROVIDER=system");
 }
