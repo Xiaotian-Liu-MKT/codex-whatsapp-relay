@@ -2,39 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  extractLocalImageReferences,
   isSupportedInboundTextMessageType,
   normalizeVoiceCommandText,
   parseVoiceTranscript
 } from "./controller-bridge.mjs";
-
-test("extractLocalImageReferences finds markdown image links and bare paths once", () => {
-  const refs = extractLocalImageReferences(`
-Attached screenshot: [checkout-shot](/tmp/checkout.png)
-Again here: /tmp/checkout.png
-Inline image: ![hero image](/Users/abuiles/screenshots/hero.jpeg)
-  `);
-
-  assert.deepEqual(refs, [
-    {
-      filePath: "/tmp/checkout.png",
-      caption: "checkout-shot"
-    },
-    {
-      filePath: "/Users/abuiles/screenshots/hero.jpeg",
-      caption: "hero image"
-    }
-  ]);
-});
-
-test("extractLocalImageReferences ignores non-image links", () => {
-  const refs = extractLocalImageReferences(`
-[notes](/tmp/readme.txt)
-/tmp/output.json
-  `);
-
-  assert.deepEqual(refs, []);
-});
 
 test("isSupportedInboundTextMessageType only accepts textual WhatsApp message types", () => {
   assert.equal(isSupportedInboundTextMessageType("conversation"), true);

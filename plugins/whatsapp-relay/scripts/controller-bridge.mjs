@@ -1,5 +1,3 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import { randomInt } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -30,17 +28,6 @@ const OUTBOX_POLL_MS = 1_000;
 const SESSION_LIST_LIMIT = 12;
 const SESSION_CONNECT_SEARCH_LIMIT = 50;
 const DANGER_CONFIRMATION_WINDOW_MS = 60_000;
-const LOCAL_IMAGE_PATH_PATTERN =
-  /\/(?:Users|tmp|var|private\/var)\/[^\s)]+?\.(?:png|jpe?g|gif|webp|bmp|svg)/gi;
-const SUPPORTED_IMAGE_EXTENSIONS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".gif",
-  ".webp",
-  ".bmp",
-  ".svg"
-]);
 const SUPPORTED_INBOUND_TEXT_MESSAGE_TYPES = new Set([
   "conversation",
   "extendedTextMessage",
@@ -107,54 +94,6 @@ function splitMessage(text, limit = MAX_WHATSAPP_MESSAGE) {
   }
 
   return parts;
-}
-
-function normalizeCandidateImagePath(candidate) {
-  const trimmed = String(candidate ?? "").trim();
-  if (!trimmed.startsWith("/")) {
-    return null;
-  }
-
-  const extension = path.extname(trimmed).toLowerCase();
-  if (!SUPPORTED_IMAGE_EXTENSIONS.has(extension)) {
-    return null;
-  }
-
-  return trimmed;
-}
-
-function pushImageRef(results, seenPaths, candidatePath, label = null) {
-  const normalizedPath = normalizeCandidateImagePath(candidatePath);
-  if (!normalizedPath || seenPaths.has(normalizedPath)) {
-    return;
-  }
-
-  seenPaths.add(normalizedPath);
-  results.push({
-    filePath: normalizedPath,
-    caption: String(label ?? "").trim() || null
-  });
-}
-
-export function extractLocalImageReferences(text) {
-  const source = String(text ?? "");
-  if (!source.trim()) {
-    return [];
-  }
-
-  const matches = [];
-  const seenPaths = new Set();
-  const markdownLinkPattern = /!?\[([^\]]*)\]\((\/[^\s)]+?\.(?:png|jpe?g|gif|webp|bmp|svg))\)/gi;
-
-  for (const match of source.matchAll(markdownLinkPattern)) {
-    pushImageRef(matches, seenPaths, match[2], match[1]);
-  }
-
-  for (const match of source.matchAll(LOCAL_IMAGE_PATH_PATTERN)) {
-    pushImageRef(matches, seenPaths, match[0], null);
-  }
-
-  return matches;
 }
 
 export function isSupportedInboundTextMessageType(messageType) {
@@ -1382,25 +1321,6 @@ export class WhatsAppControllerBridge {
 
   async sendReply(remoteJid, text) {
     await this.sendTextMessage(remoteJid, text);
-
-    const imageRefs = extractLocalImageReferences(text);
-    if (!imageRefs.length) {
-      return;
-    }
-
-    for (const imageRef of imageRefs) {
-      try {
-        await fs.access(imageRef.filePath);
-      } catch {
-        continue;
-      }
-
-      try {
-        await this.sendImageMessage(remoteJid, imageRef);
-      } catch (error) {
-        console.error(`failed to send WhatsApp image ${imageRef.filePath}`, error);
-      }
-    }
   }
 
   async sendTextMessage(chatId, text) {
@@ -1410,21 +1330,5 @@ export class WhatsAppControllerBridge {
       const sent = await socket.sendMessage(chatId, { text: part });
       this.rememberOutgoingMessage(sent?.key?.id ?? null);
     }
-  }
-
-  async sendImageMessage(chatId, { filePath, caption = null }) {
-    const socket = await this.runtime.ensureConnected();
-    const message = {
-      image: {
-        url: filePath
-      }
-    };
-
-    if (caption) {
-      message.caption = caption;
-    }
-
-    const sent = await socket.sendMessage(chatId, message);
-    this.rememberOutgoingMessage(sent?.key?.id ?? null);
   }
 }
