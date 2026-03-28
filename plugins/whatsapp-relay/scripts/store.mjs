@@ -42,7 +42,7 @@ function normalizeTimestamp(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function unwrapMessage(message) {
+export function unwrapMessage(message) {
   if (!message) {
     return null;
   }
@@ -119,6 +119,15 @@ export function extractMessageType(message) {
   }
 
   return Object.keys(payload)[0] ?? "unknown";
+}
+
+export function extractAudioMessage(message) {
+  const payload = unwrapMessage(message);
+  if (!payload?.audioMessage) {
+    return null;
+  }
+
+  return payload.audioMessage;
 }
 
 function preferredChatName(chat, contact) {

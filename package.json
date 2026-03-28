@@ -12,7 +12,8 @@
     "whatsapp:controller": "node ./plugins/whatsapp-relay/scripts/controller-daemon.mjs",
     "whatsapp:mcp": "node ./plugins/whatsapp-relay/scripts/mcp-server.mjs",
     "whatsapp:status": "node ./plugins/whatsapp-relay/scripts/whatsapp-status.mjs",
-    "check": "node --check ./plugins/whatsapp-relay/scripts/*.mjs"
+    "check": "node --check ./plugins/whatsapp-relay/scripts/*.mjs",
+    "test": "node --test ./plugins/whatsapp-relay/scripts/*.test.mjs"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",

@@ -15,7 +15,11 @@ import {
 } from "./controller-permissions.mjs";
 import { drainControllerCommands } from "./controller-outbox.mjs";
 import { ControllerStateStore } from "./controller-state.mjs";
-import { extractMessageText } from "./store.mjs";
+import { extractAudioMessage, extractMessageText, extractMessageType } from "./store.mjs";
+import {
+  DEFAULT_TRANSCRIPTION_MODEL,
+  transcribeVoiceNote
+} from "./voice-transcriber.mjs";
 
 const MAX_WHATSAPP_MESSAGE = 3500;
 const HEARTBEAT_MS = 30_000;
@@ -24,7 +28,6 @@ const OUTBOX_POLL_MS = 1_000;
 const SESSION_LIST_LIMIT = 12;
 const SESSION_CONNECT_SEARCH_LIMIT = 50;
 const DANGER_CONFIRMATION_WINDOW_MS = 60_000;
-
 function normalizeTimestamp(value) {
   if (value === undefined || value === null) {
     return null;
@@ -125,7 +128,9 @@ function helpText() {
     "/stop -> stop the in-flight Codex run for this chat",
     "/help -> show this help",
     "",
-    "Any other text in this direct chat continues your current Codex session."
+    "Any other text in this direct chat continues your current Codex session.",
+    `Voice notes are transcribed locally with ${DEFAULT_TRANSCRIPTION_MODEL}.`,
+    "Short spoken commands are supported for help, status, stop, and new session."
   ].join("\n");
 }
 
@@ -182,6 +187,108 @@ function parseIncomingCommand(text, captureAllDirectMessages) {
   }
 
   return { type: "ignored" };
+}
+
+export function normalizeVoiceCommandText(text) {
+  return String(text ?? "")
+    .normalize("NFKD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .replace(/[?!.,;:()[\]{}"'`]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function matchesVoiceCommand(text, phrases) {
+  return phrases.includes(text);
+}
+
+export function parseVoiceTranscript(transcript, captureAllDirectMessages = true) {
+  const normalized = normalizeVoiceCommandText(transcript);
+  if (!normalized) {
+    return { type: "empty" };
+  }
+
+  if (
+    matchesVoiceCommand(normalized, [
+      "help",
+      "ayuda",
+      "comandos"
+    ])
+  ) {
+    return { type: "help" };
+  }
+
+  if (
+    matchesVoiceCommand(normalized, [
+      "status",
+      "estado",
+      "session status",
+      "estado de la sesion"
+    ])
+  ) {
+    return { type: "status" };
+  }
+
+  if (
+    matchesVoiceCommand(normalized, [
+      "stop",
+      "cancel",
+      "cancelar",
+      "para",
+      "parar",
+      "deten",
+      "detente",
+      "detener"
+    ])
+  ) {
+    return { type: "stop" };
+  }
+
+  if (
+    matchesVoiceCommand(normalized, [
+      "new",
+      "new session",
+      "new chat",
+      "start over",
+      "fresh session",
+      "nueva sesion",
+      "sesion nueva",
+      "nuevo chat",
+      "reinicia",
+      "reiniciar"
+    ])
+  ) {
+    return { type: "new", prompt: "" };
+  }
+
+  if (!captureAllDirectMessages) {
+    return { type: "ignored" };
+  }
+
+  return {
+    type: "prompt",
+    prompt: String(transcript ?? "").trim()
+  };
+}
+
+function formatVoiceTranscriptReply(transcription) {
+  const confidence = Number.isFinite(transcription.avgConfidence)
+    ? ` (${Math.round(transcription.avgConfidence * 100)}% avg confidence)`
+    : "";
+  return `Transcript${confidence}: ${transcription.transcript}`;
+}
+
+function shouldRetryVoiceTranscript(transcription) {
+  if (!Number.isFinite(transcription?.avgConfidence)) {
+    return false;
+  }
+
+  const wordCount = String(transcription.transcript ?? "")
+    .split(/\s+/)
+    .filter(Boolean).length;
+
+  return transcription.avgConfidence < 0.85 && wordCount <= 4;
 }
 
 function resolveSessionPermissionLevel(config, session = {}) {
@@ -566,27 +673,91 @@ export class WhatsAppControllerBridge {
       return;
     }
 
-    const text = extractMessageText(message.message).trim();
+    const messageType = extractMessageType(message.message);
+    const audioMessage = extractAudioMessage(message.message);
+    const extractedText = extractMessageText(message.message).trim();
+    let text = audioMessage ? "" : extractedText;
     const session = this.stateStore.data.sessions[phoneKey] ?? {};
+    const label = controller.label ?? message.pushName ?? null;
 
     await this.stateStore.upsertSession(phoneKey, {
       phoneKey,
       remoteJid,
-      label: controller.label ?? message.pushName ?? null,
+      label,
       permissionLevel: resolveSessionPermissionLevel(config, session),
       lastInboundAt: new Date().toISOString(),
-      lastInboundText: text || `[${message.key?.id ?? "message"}]`
+      lastInboundText:
+        text ||
+        (audioMessage ? "[voice note]" : `[${message.key?.id ?? "message"}]`),
+      lastInboundType: audioMessage ? "voice" : messageType
     });
 
-    if (!text) {
+    let command = null;
+
+    if (text) {
+      command = parseIncomingCommand(text, config.captureAllDirectMessages);
+    } else if (audioMessage) {
       await this.sendReply(
         remoteJid,
-        "Only text messages are supported for Codex control right now."
+        [
+          "Voice note received.",
+          `Transcribing locally with ${DEFAULT_TRANSCRIPTION_MODEL}.`,
+          "The first run can take longer while the model is prepared."
+        ].join(" ")
+      );
+
+      try {
+        const audioBuffer = await this.runtime.downloadMediaBuffer(message);
+        const transcription = await transcribeVoiceNote({
+          audioBuffer,
+          mimeType: audioMessage.mimetype ?? "audio/ogg"
+        });
+        text = transcription.transcript;
+
+        await this.stateStore.upsertSession(phoneKey, {
+          ...(this.stateStore.data.sessions[phoneKey] ?? session),
+          phoneKey,
+          remoteJid,
+          label,
+          lastInboundText: text,
+          lastInboundType: "voice",
+          lastVoiceTranscriptAt: new Date().toISOString(),
+          lastVoiceTranscriptModel: transcription.model,
+          lastVoiceTranscriptConfidence: transcription.avgConfidence,
+          lastVoiceTranscriptMinConfidence: transcription.minConfidence
+        });
+
+        await this.sendReply(remoteJid, formatVoiceTranscriptReply(transcription));
+        if (shouldRetryVoiceTranscript(transcription)) {
+          await this.sendReply(
+            remoteJid,
+            "That voice note looks uncertain. Please try again with a longer note or type the command."
+          );
+          return;
+        }
+        command = parseVoiceTranscript(text, config.captureAllDirectMessages);
+      } catch (error) {
+        await this.stateStore.upsertSession(phoneKey, {
+          ...(this.stateStore.data.sessions[phoneKey] ?? session),
+          phoneKey,
+          remoteJid,
+          label,
+          lastErrorAt: new Date().toISOString(),
+          lastError: `Voice transcription failed: ${error.message}`
+        });
+        await this.sendReply(
+          remoteJid,
+          `Failed to transcribe that voice note locally: ${error.message}`
+        );
+        return;
+      }
+    } else {
+      await this.sendReply(
+        remoteJid,
+        "Only text messages and voice notes are supported for Codex control right now."
       );
       return;
     }
-
-    const command = parseIncomingCommand(text, config.captureAllDirectMessages);
     const currentSession = this.stateStore.data.sessions[phoneKey] ?? session;
     const active = this.activeRuns.get(phoneKey);
 
@@ -632,7 +803,7 @@ export class WhatsAppControllerBridge {
             remoteJid,
             prompt: command.prompt,
             forceNewThread: true,
-            label: controller.label ?? message.pushName ?? null
+            label
           });
         } else {
           await this.sendReply(
@@ -649,7 +820,7 @@ export class WhatsAppControllerBridge {
           phoneKey,
           remoteJid,
           payload: command.payload,
-          label: controller.label ?? message.pushName ?? null
+          label
         });
         return;
       case "permissions":
@@ -657,7 +828,7 @@ export class WhatsAppControllerBridge {
           phoneKey,
           remoteJid,
           payload: command.payload,
-          label: controller.label ?? message.pushName ?? null
+          label
         });
         return;
       case "approvalDecision":
@@ -669,7 +840,7 @@ export class WhatsAppControllerBridge {
           remoteJid,
           prompt: command.prompt,
           forceNewThread: false,
-          label: controller.label ?? message.pushName ?? null
+          label
         });
         return;
       default:

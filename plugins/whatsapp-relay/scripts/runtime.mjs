@@ -7,6 +7,7 @@ import { Boom } from "@hapi/boom";
 import makeWASocket, {
   Browsers,
   DisconnectReason,
+  downloadMediaMessage,
   fetchLatestWaWebVersion,
   useMultiFileAuthState
 } from "@whiskeysockets/baileys";
@@ -365,6 +366,14 @@ export class WhatsAppRuntime {
 
     await this.start({ printQrToTerminal: false });
     return this.waitForConnection(timeoutMs);
+  }
+
+  async downloadMediaBuffer(message) {
+    const socket = await this.ensureConnected();
+    return downloadMediaMessage(message, "buffer", {}, {
+      logger: this.logger,
+      reuploadRequest: socket.updateMediaMessage
+    });
   }
 
   async startAuthFlow(timeoutMs = 20_000) {

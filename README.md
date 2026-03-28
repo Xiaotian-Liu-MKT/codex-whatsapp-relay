@@ -11,6 +11,7 @@ The useful part is the mental model: scan a QR once, let the relay hold the What
 - message yourself and treat that chat like a lightweight Codex client
 - ask Codex to ping someone on WhatsApp without leaving your terminal
 - keep a real Codex thread going from your phone with session switching and permission controls
+- talk to Codex with voice notes that are transcribed locally before they hit the session
 - use the same relay for chat inspection, message sending, and phone control
 - resume in your terminal with `codex resume`
 
@@ -76,6 +77,7 @@ Your phone <-> WhatsApp Relay <-> Codex thread
 Once the controller bridge is running, allowed direct chats can send:
 
 - plain text to continue the current Codex session
+- voice notes to continue the current Codex session after local transcription
 - `/new` to start a fresh session
 - `/sessions` to list recent Codex threads
 - `/connect <thread-id-prefix>` to switch this chat to another Codex session
@@ -87,6 +89,7 @@ Once the controller bridge is running, allowed direct chats can send:
 - `/help` to see command help
 
 `danger-full-access` requires an explicit confirmation code sent back over WhatsApp before the bridge disables the sandbox for that chat session.
+Voice notes are transcribed locally with `mlx-community/parakeet-tdt-0.6b-v3` through `uvx` and `ffmpeg`. The bridge echoes the transcript back before acting on it, and very short low-confidence transcriptions are rejected so you can retry instead of sending garbage to Codex.
 
 ## What It Does
 
@@ -97,12 +100,30 @@ Once the controller bridge is running, allowed direct chats can send:
 - can expose Codex through WhatsApp for allowed phone numbers
 - can switch a phone chat between existing Codex threads
 - can run each phone chat at `read-only`, `workspace-write`, or `danger-full-access`
+- can transcribe WhatsApp voice notes locally and feed them into the active Codex session
 
 ## Safety Notes
 
 - `workspace-write` is the default bridge permission level. It keeps the chat inside the workspace and relays approval prompts back to WhatsApp before guarded actions run.
 - `danger-full-access` is per-chat and requires a confirmation code. Use `/new` or `/permissions workspace-write` to drop back down.
 - Auth material under `plugins/whatsapp-relay/data/auth*` is local runtime state and should never be committed.
+- Typed slash commands remain the most reliable way to change sessions or permissions. Voice notes work best for natural prompts and short spoken commands like `help`, `status`, `stop`, and `new session`.
+
+## Voice Notes
+
+Voice-note control is local-first. The bridge downloads the WhatsApp audio, normalizes it with `ffmpeg`, runs Parakeet v3 through `uvx`, and then forwards the transcript into the existing `codex app-server` session.
+
+You need these local tools available on the machine running the bridge:
+
+- `ffmpeg`
+- `uvx`
+
+Optional environment variables:
+
+- `WHATSAPP_RELAY_STT_MODEL` to override the default `mlx-community/parakeet-tdt-0.6b-v3`
+- `WHATSAPP_RELAY_STT_TIMEOUT_MS` to extend or reduce the transcription timeout
+
+The first voice note can be noticeably slower because `uvx` may need to install `parakeet-mlx` and download the model cache.
 
 ## CLI Fallback
 
