@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Voice-note control for WhatsApp bridge chats with local Parakeet v3 transcription.
+- Local audio download and transcription pipeline using Baileys media download, `ffmpeg`, and `uvx --from parakeet-mlx`.
+
+### Changed
+
+- WhatsApp bridge help and session handling now accept voice notes alongside text prompts.
+- Short low-confidence voice-note transcripts now ask for a retry instead of sending a likely-garbled prompt to Codex.
+
 ## [0.2.0] - 2026-03-28
 
 ### Added

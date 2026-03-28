@@ -30,6 +30,7 @@ Use this skill when the user wants to connect WhatsApp, inspect recent chats, re
 7. Once the bridge is running, allowed direct chats can:
 
    - send plain text to continue the current Codex session
+   - send voice notes that are transcribed locally before continuing the current Codex session
    - send `/new` to start fresh
    - send `/sessions` to list recent Codex threads
    - send `/connect <thread-id-prefix>` to switch this chat to another Codex session
@@ -43,6 +44,7 @@ Use this skill when the user wants to connect WhatsApp, inspect recent chats, re
    The bridge uses `codex app-server` under the hood so each allowed number maps to a native Codex thread that can be resumed across messages.
    `workspace-write` is the safe default because guarded command and file-change approvals can be answered from WhatsApp.
    `danger-full-access` requires an explicit confirmation code from the chat before the bridge disables sandboxing for that session.
+   Voice notes are transcribed locally with Parakeet v3 via `uvx` and `ffmpeg`, and short low-confidence transcripts are rejected so the chat can retry instead of sending a bad prompt to Codex.
    While the bridge is running, treat it as the sole owner of the live WhatsApp session. Prefer cached reads from MCP tools and route outbound messages through the bridge instead of reconnecting a second socket.
    If the allowed controller is the same WhatsApp account linked to the plugin, the self chat can be used as the control surface and should be treated as a valid source of prompts.
 
@@ -61,3 +63,4 @@ Use this skill when the user wants to connect WhatsApp, inspect recent chats, re
 - When relaying a QR from the plugin tools, preserve the compact block as-is instead of restyling or expanding it.
 - Only allow explicit controller numbers to drive Codex from WhatsApp. Group chats should not be used as a control surface.
 - Treat anything under `plugins/whatsapp-relay/data/auth*` as sensitive local state and keep it out of git.
+- Typed slash commands remain the most reliable admin surface for sessions, permissions, and approvals; voice notes are best for natural prompts plus short commands like `help`, `status`, `stop`, and `new session`.
