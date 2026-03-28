@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-03-28
+
 ### Added
 
 - Voice-note control for WhatsApp bridge chats with local Parakeet v3 transcription.
@@ -13,6 +15,11 @@ All notable changes to this project will be documented in this file.
 
 - WhatsApp bridge help and session handling now accept voice notes alongside text prompts.
 - Short low-confidence voice-note transcripts now ask for a retry instead of sending a likely-garbled prompt to Codex.
+- Spoken `cancelar` now cancels a pending approval from a voice-controlled chat.
+
+### Fixed
+
+- Transcriber timeout cleanup now force-kills the child process only when it is still actually running.
 
 ## [0.2.0] - 2026-03-28
 
