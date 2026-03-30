@@ -6,17 +6,17 @@ Use this repo's release process every time a new version ships.
 
 1. Work from `main`, not `master`.
 2. Make sure the target changes are already merged into `main`.
-3. Update `CHANGELOG.md`.
-4. Move the current `Unreleased` notes into a new versioned section with the release date.
-5. Leave a fresh `Unreleased` section at the top.
-6. Bump the version in `package.json`.
-7. If `package-lock.json` is tracked in the environment where the release is being prepared, keep it in sync with the new version.
-8. Update the README install instructions so they point at the latest released tag.
-9. In the README section `Install In Codex`, update all release-pinned values together:
-10. The repository URL must stay correct.
-11. The `Install the current release tag:` value must match the new tag, for example `v0.4.2`.
-12. The step that checks out the release must use that same tag.
-13. Keep the install instructions pinned to a release tag instead of a floating branch.
+3. Update `CHANGELOG.md` so `## [Unreleased]` contains the release notes you want to ship.
+4. Run the deterministic release prep script with explicit inputs:
+5. `npm run release:prepare -- --version X.Y.Z --date YYYY-MM-DD`
+6. The script is the source of truth for release-managed file updates. It updates all of these together:
+7. `CHANGELOG.md`
+8. `package.json`
+9. `package-lock.json`
+10. `plugins/whatsapp-relay/.codex-plugin/plugin.json`
+11. `README.md` release-pinned install tag references
+12. Use `--dry-run` first if you want a no-write preview.
+13. Review the diff after the script runs.
 14. Run `npm run check`.
 15. Run `npm test`.
 16. If the release touches voice replies or local TTS routing, run a smoke test with `npm run whatsapp:tts:smoke`.
@@ -42,5 +42,6 @@ When refreshing the locally installed Codex plugin after a release:
 ## Notes
 
 - The repo's primary branch is `main`.
+- The canonical repository URL is `https://github.com/abuiles/codex-whatsapp-relay`. Keep plugin metadata and README install instructions aligned with the actual git remote.
 - The README install prompt is part of the release surface and must be updated on every new release.
 - The goal is that a fresh Codex install follows the latest tagged release by default.
