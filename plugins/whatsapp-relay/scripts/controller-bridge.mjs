@@ -343,6 +343,7 @@ function helpText() {
     "/help or /h -> show this help",
     "",
     "Any other text in this direct chat continues the active project's current Codex session.",
+    "If that same project or /btw scope is already busy, prompt-like follow-ups queue automatically and run in order.",
     `Voice notes are transcribed locally with ${DEFAULT_TRANSCRIPTION_MODEL}.`,
     "Short spoken commands are supported for help, status, stop, and new session.",
     "Say or type 'start new session in alpha app inside code directory' to jump into another repo without manually adding it first.",
@@ -1450,6 +1451,244 @@ export class WhatsAppControllerBridge {
       .filter(Boolean);
   }
 
+  getQueuedPrompts(phoneKey, { scopeType = "project", projectAlias = null } = {}) {
+    const chatSession = this.getChatSession(phoneKey);
+    if (scopeType === "btw") {
+      return [...(chatSession.btw?.queuedPrompts ?? [])];
+    }
+
+    const project = resolveConfiguredProject(
+      this.configStore.data,
+      projectAlias ?? this.getActiveProject(phoneKey).alias
+    );
+    return [...(chatSession.projects?.[project.alias]?.queuedPrompts ?? [])];
+  }
+
+  queuedPromptCount(phoneKey, options = {}) {
+    return this.getQueuedPrompts(phoneKey, options).length;
+  }
+
+  async enqueueQueuedPrompt({
+    phoneKey,
+    remoteJid,
+    label,
+    scopeType = "project",
+    projectAlias = null,
+    prompt,
+    forceNewThread = false,
+    voiceReplyOverride = null
+  }) {
+    const trimmedPrompt = String(prompt ?? "").trim();
+    if (!trimmedPrompt) {
+      return 0;
+    }
+
+    const queuedPrompt = {
+      prompt: trimmedPrompt,
+      forceNewThread,
+      queuedAt: new Date().toISOString(),
+      voiceReplyOverride:
+        voiceReplyOverride?.enabled
+          ? {
+              enabled: true,
+              speed: voiceReplyOverride.speed ?? null
+            }
+          : null
+    };
+    const chatSession = this.getChatSession(phoneKey);
+
+    if (scopeType === "btw") {
+      const nextQueue = [...(chatSession.btw?.queuedPrompts ?? []), queuedPrompt];
+      await this.upsertChatSession(phoneKey, {
+        phoneKey,
+        remoteJid,
+        label,
+        btw: {
+          ...(chatSession.btw ?? {}),
+          lastUsedAt: new Date().toISOString(),
+          queuedPrompts: nextQueue
+        }
+      });
+      return nextQueue.length;
+    }
+
+    const project = resolveConfiguredProject(
+      this.configStore.data,
+      projectAlias ?? this.getActiveProject(phoneKey).alias
+    );
+    const projectSession = chatSession.projects?.[project.alias] ?? defaultProjectSession();
+    const nextQueue = [...(projectSession.queuedPrompts ?? []), queuedPrompt];
+    await this.upsertProjectSession(phoneKey, project.alias, {
+      chatPatch: {
+        phoneKey,
+        remoteJid,
+        label
+      },
+      projectPatch: {
+        queuedPrompts: nextQueue
+      }
+    });
+    return nextQueue.length;
+  }
+
+  async dequeueQueuedPrompt(phoneKey, { scopeType = "project", projectAlias = null } = {}) {
+    const chatSession = this.getChatSession(phoneKey);
+    if (scopeType === "btw") {
+      const queuedPrompts = [...(chatSession.btw?.queuedPrompts ?? [])];
+      const nextPrompt = queuedPrompts.shift() ?? null;
+      if (!nextPrompt) {
+        return null;
+      }
+
+      await this.upsertChatSession(phoneKey, {
+        phoneKey,
+        btw: {
+          ...(chatSession.btw ?? {}),
+          queuedPrompts
+        }
+      });
+      return nextPrompt;
+    }
+
+    const project = resolveConfiguredProject(
+      this.configStore.data,
+      projectAlias ?? this.getActiveProject(phoneKey).alias
+    );
+    const projectSession = chatSession.projects?.[project.alias] ?? defaultProjectSession();
+    const queuedPrompts = [...(projectSession.queuedPrompts ?? [])];
+    const nextPrompt = queuedPrompts.shift() ?? null;
+    if (!nextPrompt) {
+      return null;
+    }
+
+    await this.upsertProjectSession(phoneKey, project.alias, {
+      projectPatch: {
+        queuedPrompts
+      }
+    });
+    return nextPrompt;
+  }
+
+  async clearQueuedPrompts(phoneKey, { scopeType = "project", projectAlias = null } = {}) {
+    const chatSession = this.getChatSession(phoneKey);
+    if (scopeType === "btw") {
+      const queuedCount = (chatSession.btw?.queuedPrompts ?? []).length;
+      if (!queuedCount) {
+        return 0;
+      }
+
+      await this.upsertChatSession(phoneKey, {
+        phoneKey,
+        btw: {
+          ...(chatSession.btw ?? {}),
+          queuedPrompts: []
+        }
+      });
+      return queuedCount;
+    }
+
+    const project = resolveConfiguredProject(
+      this.configStore.data,
+      projectAlias ?? this.getActiveProject(phoneKey).alias
+    );
+    const queuedCount = (chatSession.projects?.[project.alias]?.queuedPrompts ?? []).length;
+    if (!queuedCount) {
+      return 0;
+    }
+
+    await this.upsertProjectSession(phoneKey, project.alias, {
+      projectPatch: {
+        queuedPrompts: []
+      }
+    });
+    return queuedCount;
+  }
+
+  async queuePromptIfBusy({
+    phoneKey,
+    remoteJid,
+    label,
+    scopeType = "project",
+    projectAlias = null,
+    prompt,
+    forceNewThread = false,
+    voiceReplyOverride = null,
+    statusPrelude = null
+  }) {
+    const project = resolveConfiguredProject(
+      this.configStore.data,
+      projectAlias ?? this.getActiveProject(phoneKey).alias
+    );
+    const activeRun =
+      scopeType === "btw"
+        ? this.btwRun(phoneKey)
+        : this.projectRun(phoneKey, project.alias);
+    if (!activeRun) {
+      return false;
+    }
+
+    const queuedCount = await this.enqueueQueuedPrompt({
+      phoneKey,
+      remoteJid,
+      label,
+      scopeType,
+      projectAlias: project.alias,
+      prompt,
+      forceNewThread,
+      voiceReplyOverride
+    });
+    await this.sendReply(
+      remoteJid,
+      joinMessageSections(
+        statusPrelude,
+        scopeType === "btw"
+          ? "Queued your next btw message. I will read it as soon as the current task finishes."
+          : `Queued your next message for project ${project.alias}. I will read it as soon as the current task finishes.`,
+        activeRun.pendingApproval
+          ? "The current run is still waiting on approval."
+          : null,
+        queuedCount > 1 ? `Queue depth for this scope: ${queuedCount}.` : null
+      )
+    );
+    return true;
+  }
+
+  async runNextQueuedPrompt({
+    phoneKey,
+    remoteJid,
+    label,
+    scopeType = "project",
+    projectAlias = null
+  }) {
+    const project = resolveConfiguredProject(
+      this.configStore.data,
+      projectAlias ?? this.getActiveProject(phoneKey).alias
+    );
+    const queuedPrompt = await this.dequeueQueuedPrompt(phoneKey, {
+      scopeType,
+      projectAlias: project.alias
+    });
+    if (!queuedPrompt) {
+      return false;
+    }
+
+    await this.runPrompt({
+      phoneKey,
+      remoteJid,
+      prompt: queuedPrompt.prompt,
+      forceNewThread: Boolean(queuedPrompt.forceNewThread),
+      label,
+      scopeType,
+      projectAlias: project.alias,
+      voiceReplyOverride: queuedPrompt.voiceReplyOverride ?? null,
+      statusPrelude:
+        scopeType === "btw"
+          ? "Running your queued btw follow-up now."
+          : `Running your queued follow-up in ${project.alias} now.`
+    });
+    return true;
+  }
+
   async ensureProject(spec, { phoneKey = null } = {}) {
     const config = await this.configStore.load();
     const explicitProject = resolveExplicitConfiguredProject(config, spec);
@@ -2030,6 +2269,20 @@ export class WhatsAppControllerBridge {
         {
           const activeRun = this.projectRun(phoneKey, activeProject.alias);
           if (activeRun) {
+            if (command.prompt) {
+              await this.queuePromptIfBusy({
+                phoneKey,
+                remoteJid,
+                label,
+                scopeType: "project",
+                projectAlias: activeProject.alias,
+                prompt: command.prompt,
+                forceNewThread: true,
+                voiceReplyOverride: command.voiceReply ?? null,
+                statusPrelude: voiceTranscriptReply
+              });
+              return;
+            }
             await this.sendReply(
               remoteJid,
               `Wait for the active Codex run in ${activeProject.alias} to finish or send /stop ${activeProject.alias} before resetting that project.`
@@ -2098,6 +2351,22 @@ export class WhatsAppControllerBridge {
             return;
           }
 
+          if (
+            await this.queuePromptIfBusy({
+              phoneKey,
+              remoteJid,
+              label,
+              scopeType: "project",
+              projectAlias: targetProject.alias,
+              prompt: parsed.prompt,
+              forceNewThread: false,
+              voiceReplyOverride: command.voiceReply ?? null,
+              statusPrelude: voiceTranscriptReply
+            })
+          ) {
+            return;
+          }
+
           await this.runPrompt({
             phoneKey,
             remoteJid,
@@ -2112,6 +2381,21 @@ export class WhatsAppControllerBridge {
         }
         return;
       case "btw":
+        if (
+          await this.queuePromptIfBusy({
+            phoneKey,
+            remoteJid,
+            label,
+            scopeType: "btw",
+            projectAlias: activeProject.alias,
+            prompt: command.prompt,
+            forceNewThread: true,
+            voiceReplyOverride: command.voiceReply ?? null,
+            statusPrelude: voiceTranscriptReply
+          })
+        ) {
+          return;
+        }
         await this.runPrompt({
           phoneKey,
           remoteJid,
@@ -2147,6 +2431,21 @@ export class WhatsAppControllerBridge {
         await this.handleApprovalDecision(phoneKey, remoteJid, command.decision, command.payload);
         return;
       case "prompt":
+        if (
+          await this.queuePromptIfBusy({
+            phoneKey,
+            remoteJid,
+            label,
+            scopeType: "project",
+            projectAlias: activeProject.alias,
+            prompt: command.prompt,
+            forceNewThread: false,
+            voiceReplyOverride: command.voiceReply ?? null,
+            statusPrelude: voiceTranscriptReply
+          })
+        ) {
+          return;
+        }
         await this.runPrompt({
           phoneKey,
           remoteJid,
@@ -2340,6 +2639,7 @@ export class WhatsAppControllerBridge {
         `active_project: ${activeProject.alias}`,
         "target: btw",
         `busy: ${btw ? "yes" : "no"}`,
+        `queued_messages: ${this.queuedPromptCount(phoneKey, { scopeType: "btw" })}`,
         `voice_reply: ${formatVoiceReplySummary(voiceReply)}`,
         ...buildActiveRunStatusLines(btw),
         btw?.pendingApproval ? `approval_pending: yes (${btw.pendingApproval.kind})` : null
@@ -2366,6 +2666,10 @@ export class WhatsAppControllerBridge {
       `project: ${project.alias}`,
       `session: ${shortThreadId(projectSession.threadId ?? null)}`,
       `busy: ${activeRun ? "yes" : "no"}`,
+      `queued_messages: ${this.queuedPromptCount(phoneKey, {
+        scopeType: "project",
+        projectAlias: project.alias
+      })}`,
       `permissions: ${permissionLevel}`,
       `voice_reply: ${formatVoiceReplySummary(voiceReply)}`,
       `voice_reply_provider: ${resolveConfiguredTtsProvider(config)}`,
@@ -2901,6 +3205,10 @@ export class WhatsAppControllerBridge {
     }
 
     this.activeRuns.delete(runKey);
+    const clearedQueued = await this.clearQueuedPrompts(phoneKey, {
+      scopeType: target.targetType === "btw" ? "btw" : "project",
+      projectAlias: project.alias
+    });
     if (target.targetType !== "btw") {
       await this.upsertProjectSession(phoneKey, project.alias, {
         projectPatch: {
@@ -2910,9 +3218,16 @@ export class WhatsAppControllerBridge {
     }
     await this.sendReply(
       remoteJid,
-      target.targetType === "btw"
-        ? "Stopped the active Codex run for btw."
-        : `Stopped the active Codex run for project ${project.alias}.`
+      joinMessageSections(
+        target.targetType === "btw"
+          ? "Stopped the active Codex run for btw."
+          : `Stopped the active Codex run for project ${project.alias}.`,
+        clearedQueued
+          ? `Cleared ${clearedQueued} queued follow-up message${
+              clearedQueued === 1 ? "" : "s"
+            } for this scope.`
+          : null
+      )
     );
   }
 
@@ -3210,6 +3525,13 @@ export class WhatsAppControllerBridge {
                 )
           );
         }
+        await this.runNextQueuedPrompt({
+          phoneKey,
+          remoteJid,
+          label,
+          scopeType,
+          projectAlias: project.alias
+        });
         return;
       }
 
@@ -3226,6 +3548,13 @@ export class WhatsAppControllerBridge {
               replyText
             )
       );
+      await this.runNextQueuedPrompt({
+        phoneKey,
+        remoteJid,
+        label,
+        scopeType,
+        projectAlias: project.alias
+      });
     } catch (error) {
       this.activeRuns.delete(runKey);
       if (activeRun.cancelled) {
@@ -3261,6 +3590,13 @@ export class WhatsAppControllerBridge {
               error.message
             )
       );
+      await this.runNextQueuedPrompt({
+        phoneKey,
+        remoteJid,
+        label,
+        scopeType,
+        projectAlias: project.alias
+      });
     }
   }
 
