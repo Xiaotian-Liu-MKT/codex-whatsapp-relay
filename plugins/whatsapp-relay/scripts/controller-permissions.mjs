@@ -1,4 +1,4 @@
-const DEFAULT_PERMISSION_LEVEL = "workspace-write";
+const DEFAULT_PERMISSION_LEVEL = "danger-full-access";
 
 const PERMISSION_LEVELS = {
   "read-only": {

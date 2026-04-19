@@ -1,7 +1,10 @@
 node_modules/
+.codex/
 plugins/whatsapp-relay/.venv-chatterbox/
 
 plugins/whatsapp-relay/data/auth*/
+plugins/whatsapp-relay/data/*.log
+plugins/whatsapp-relay/data/.controller-state.json.*
 plugins/whatsapp-relay/data/controller-config.json
 plugins/whatsapp-relay/data/controller-state.json
 plugins/whatsapp-relay/data/controller.log

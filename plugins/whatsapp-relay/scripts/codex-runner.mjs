@@ -452,12 +452,78 @@ function formatCloseError({ code, signal, stderr }) {
   );
 }
 
+export function resolveCodexSpawn(
+  codexBin,
+  args = [],
+  {
+    platform = process.platform,
+    env = process.env,
+    nodePath = process.execPath
+  } = {}
+) {
+  const command = String(codexBin ?? "").trim();
+  const nextArgs = [...args];
+  if (!command) {
+    return {
+      command,
+      args: nextArgs
+    };
+  }
+
+  if (platform !== "win32") {
+    return {
+      command,
+      args: nextArgs
+    };
+  }
+
+  const baseName = path.basename(command).toLowerCase();
+  const looksLikeCodexWrapper = new Set([
+    "codex",
+    "codex.cmd",
+    "codex.ps1",
+    "codex.bat",
+    "codex.js"
+  ]);
+
+  if (!looksLikeCodexWrapper.has(baseName)) {
+    return {
+      command,
+      args: nextArgs
+    };
+  }
+
+  const appData = String(env.APPDATA ?? "").trim();
+  if (!appData) {
+    return {
+      command,
+      args: nextArgs
+    };
+  }
+
+  const codexScript = path.join(
+    appData,
+    "npm",
+    "node_modules",
+    "@openai",
+    "codex",
+    "bin",
+    "codex.js"
+  );
+
+  return {
+    command: nodePath,
+    args: [codexScript, ...nextArgs]
+  };
+}
+
 async function runCodexExec({
   codexBin,
   args,
   cwd
 }) {
-  const child = spawn(codexBin, args, {
+  const resolved = resolveCodexSpawn(codexBin, args);
+  const child = spawn(resolved.command, resolved.args, {
     cwd,
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -538,14 +604,18 @@ function startAppServerClient({
   onClose = null
 }) {
   const resolvedPermissionLevel = resolvePermissionLevel(permissionLevel);
-  const child = spawn(
+  const resolvedSpawn = resolveCodexSpawn(
     codexBin,
     configArgs({
       model,
       profile,
       search,
       permissionLevel: resolvedPermissionLevel
-    }),
+    })
+  );
+  const child = spawn(
+    resolvedSpawn.command,
+    resolvedSpawn.args,
     {
       cwd: workspace,
       stdio: ["pipe", "pipe", "pipe"]

@@ -6,6 +6,7 @@ import {
   buildVoiceCommandIntentPrompt,
   normalizeCodexTurnNotification,
   normalizeProjectIntentSelection,
+  resolveCodexSpawn,
   normalizeVoiceCommandIntent
 } from "./codex-runner.mjs";
 
@@ -233,5 +234,38 @@ test("normalizeCodexTurnNotification ignores unrelated turns and threads", () =>
       { activeTurnId: "turn-1", resolvedThreadId: "thread-1" }
     ),
     null
+  );
+});
+
+test("resolveCodexSpawn rewrites bare codex to node plus codex.js on Windows", () => {
+  assert.deepEqual(
+    resolveCodexSpawn("codex", ["app-server"], {
+      platform: "win32",
+      env: {
+        APPDATA: "C:\\Users\\91784\\AppData\\Roaming"
+      },
+      nodePath: "C:\\Program Files\\nodejs\\node.exe"
+    }),
+    {
+      command: "C:\\Program Files\\nodejs\\node.exe",
+      args: [
+        "C:\\Users\\91784\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js",
+        "app-server"
+      ]
+    }
+  );
+});
+
+test("resolveCodexSpawn leaves non-Windows codex launches unchanged", () => {
+  assert.deepEqual(
+    resolveCodexSpawn("codex", ["app-server"], {
+      platform: "linux",
+      env: {},
+      nodePath: "/usr/bin/node"
+    }),
+    {
+      command: "codex",
+      args: ["app-server"]
+    }
   );
 });
