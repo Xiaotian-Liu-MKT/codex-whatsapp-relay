@@ -53,13 +53,15 @@ test("ControllerConfigStore normalizes boolean-like non-English overrides from d
 test("ControllerConfigStore migrates a legacy single-workspace config into projects", async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-config-test-"));
   const filePath = path.join(tempDir, "controller-config.json");
+  const legacyWorkspace = "/tmp/alpha-app";
+  const normalizedWorkspace = path.resolve(legacyWorkspace);
 
   try {
     await fs.writeFile(
       filePath,
       JSON.stringify({
         enabled: true,
-        workspace: "/tmp/alpha-app",
+        workspace: legacyWorkspace,
         model: "gpt-5.4",
         allowedControllers: []
       }),
@@ -70,10 +72,10 @@ test("ControllerConfigStore migrates a legacy single-workspace config into proje
     const config = await store.load();
 
     assert.equal(config.defaultProject, "main");
-    assert.equal(config.workspace, "/tmp/alpha-app");
+    assert.equal(config.workspace, normalizedWorkspace);
     assert.equal(config.projects.length, 1);
     assert.equal(config.projects[0].alias, "main");
-    assert.equal(config.projects[0].workspace, "/tmp/alpha-app");
+    assert.equal(config.projects[0].workspace, normalizedWorkspace);
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }

@@ -16,43 +16,50 @@ import {
 } from "./controller-projects.mjs";
 
 test("normalizeConfiguredProjects migrates a legacy single-workspace config", () => {
+  const legacyWorkspace = "/tmp/example";
+  const normalizedWorkspace = path.resolve(legacyWorkspace);
   const normalized = normalizeConfiguredProjects({
-    workspace: "/tmp/example",
+    workspace: legacyWorkspace,
     defaultProject: "main"
   });
 
   assert.equal(normalized.defaultProject, "main");
-  assert.equal(normalized.workspace, "/tmp/example");
+  assert.equal(normalized.workspace, normalizedWorkspace);
   assert.equal(normalized.projects.length, 1);
   assert.equal(normalized.projects[0].alias, "main");
-  assert.equal(normalized.projects[0].workspace, "/tmp/example");
+  assert.equal(normalized.projects[0].workspace, normalizedWorkspace);
 });
 
 test("normalizeConfiguredProjects collapses duplicate workspaces down to one project", () => {
+  const duplicateWorkspace = "/tmp/retail-dashboard";
+  const normalizedWorkspace = path.resolve(duplicateWorkspace);
   const normalized = normalizeConfiguredProjects({
     defaultProject: "main",
     projects: [
-      { alias: "retail-dashboard", workspace: "/tmp/retail-dashboard" },
-      { alias: "retail-dashboard-2", workspace: "/tmp/retail-dashboard" }
+      { alias: "retail-dashboard", workspace: duplicateWorkspace },
+      { alias: "retail-dashboard-2", workspace: duplicateWorkspace }
     ]
   });
 
   assert.equal(normalized.projects.length, 1);
   assert.equal(normalized.projects[0].alias, "retail-dashboard");
-  assert.equal(normalized.projects[0].workspace, "/tmp/retail-dashboard");
+  assert.equal(normalized.projects[0].workspace, normalizedWorkspace);
 });
 
 test("resolveConfiguredProject finds aliases and workspace basenames", () => {
+  const relayWorkspace = "/tmp/relay";
+  const alphaWorkspace = "/tmp/alpha-app";
+  const normalizedAlphaWorkspace = path.resolve(alphaWorkspace);
   const config = {
     defaultProject: "relay",
     projects: [
-      { alias: "relay", workspace: "/tmp/relay" },
-      { alias: "alpha-app", workspace: "/tmp/alpha-app" }
+      { alias: "relay", workspace: relayWorkspace },
+      { alias: "alpha-app", workspace: alphaWorkspace }
     ]
   };
 
-  assert.equal(resolveConfiguredProject(config, "alpha-app")?.workspace, "/tmp/alpha-app");
-  assert.equal(resolveConfiguredProject(config, "alpha app")?.workspace, "/tmp/alpha-app");
+  assert.equal(resolveConfiguredProject(config, "alpha-app")?.workspace, normalizedAlphaWorkspace);
+  assert.equal(resolveConfiguredProject(config, "alpha app")?.workspace, normalizedAlphaWorkspace);
 });
 
 test("findConfiguredProject resolves unique prefixes and existing workspaces", () => {
