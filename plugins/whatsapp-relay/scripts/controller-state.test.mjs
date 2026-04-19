@@ -171,3 +171,46 @@ test("ControllerStateStore persists queued prompts per project and btw scope", a
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("ControllerStateStore persists deferred long replies per project and btw scope", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-state-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+
+  try {
+    const store = new ControllerStateStore(filePath);
+    await store.load();
+    await store.upsertSession("123", {
+      phoneKey: "123",
+      activeProject: "alpha-app",
+      projects: {
+        "alpha-app": {
+          pendingLongReply: {
+            parts: ["Part 1", "Part 2"],
+            nextIndex: 1,
+            updatedAt: "2026-04-19T10:00:00.000Z"
+          }
+        }
+      },
+      btw: {
+        pendingLongReply: {
+          parts: ["Side answer 1", "Side answer 2", "  "],
+          nextIndex: 0
+        }
+      }
+    });
+
+    const session = store.getSession("123");
+    assert.deepEqual(session.projects["alpha-app"].pendingLongReply, {
+      parts: ["Part 1", "Part 2"],
+      nextIndex: 1,
+      updatedAt: "2026-04-19T10:00:00.000Z"
+    });
+    assert.deepEqual(session.btw.pendingLongReply, {
+      parts: ["Side answer 1", "Side answer 2"],
+      nextIndex: 0,
+      updatedAt: null
+    });
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});

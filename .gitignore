@@ -12,6 +12,9 @@ plugins/whatsapp-relay/data/controller-outbox/
 plugins/whatsapp-relay/data/controller-outbox.failed/
 plugins/whatsapp-relay/data/store.json
 plugins/whatsapp-relay/data/runtime.json
+plugins/whatsapp-relay/data/assistant-auth-*.txt
+plugins/whatsapp-relay/data/assistant-auth-*.json
+plugins/whatsapp-relay/data/assistant-bg-test.txt
 
 npm-debug.log*
 .worktrees

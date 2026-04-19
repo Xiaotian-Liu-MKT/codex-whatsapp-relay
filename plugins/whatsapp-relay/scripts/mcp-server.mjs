@@ -14,7 +14,7 @@ import {
   stopControllerDaemon
 } from "./controller-process.mjs";
 import { credsFile, storeFile } from "./paths.mjs";
-import { WhatsAppRuntime } from "./runtime.mjs";
+import { compactRenderedQr, WhatsAppRuntime } from "./runtime.mjs";
 import { normalizeTtsProvider } from "./voice-replier.mjs";
 
 const runtime = new WhatsAppRuntime({
@@ -61,7 +61,7 @@ function textResult(text, { isError = false } = {}) {
 }
 
 function formatQrBlock(qrText) {
-  return ["```text", qrText.trimEnd(), "```"].join("\n");
+  return ["```text", compactRenderedQr(qrText).trimEnd(), "```"].join("\n");
 }
 
 async function getBridgeState() {

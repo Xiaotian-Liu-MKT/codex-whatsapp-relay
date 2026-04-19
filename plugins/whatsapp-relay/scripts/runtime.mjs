@@ -1,5 +1,4 @@
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -13,7 +12,8 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import pino from "pino";
 
-import { authDir, credsFile, ensureRuntimeDirs, runtimeFile, storeFile } from "./paths.mjs";
+import { authDir, ensureRuntimeDirs, runtimeFile, storeFile } from "./paths.mjs";
+import { hasUsableStoredCreds, repairCorruptAuthState } from "./auth-state.mjs";
 import { WhatsAppStore } from "./store.mjs";
 
 const require = createRequire(import.meta.url);
@@ -60,17 +60,24 @@ function buildQrMatrix(value, quietZone = 2) {
   return matrix;
 }
 
-function renderCompactQr(value) {
-  const matrix = buildQrMatrix(value);
+export function renderTerminalQr(value, { quietZone = 4 } = {}) {
+  return buildQrMatrix(value, quietZone)
+    .map((row) => row.map((cell) => (cell ? "██" : "  ")).join(""))
+    .join("\n");
+}
+
+export function compactRenderedQr(renderedQr) {
+  const matrix = renderedQr.split(/\r?\n/);
   const rows = [];
 
   for (let row = 0; row < matrix.length; row += 2) {
+    const upperRow = matrix[row] ?? "";
+    const lowerRow = matrix[row + 1] ?? "";
     let line = "";
-    const lowerRow = matrix[row + 1] ?? [];
 
-    for (let col = 0; col < matrix[row].length; col += 1) {
-      const upperDark = matrix[row][col] ? "1" : "0";
-      const lowerDark = lowerRow[col] ? "1" : "0";
+    for (let column = 0; column < upperRow.length; column += 2) {
+      const upperDark = upperRow.slice(column, column + 2) === "██" ? "1" : "0";
+      const lowerDark = lowerRow.slice(column, column + 2) === "██" ? "1" : "0";
       line += VERTICAL_BLOCKS[`${upperDark}${lowerDark}`];
     }
 
@@ -78,6 +85,10 @@ function renderCompactQr(value) {
   }
 
   return rows.join("\n");
+}
+
+export function renderCompactQr(value, { quietZone = 4 } = {}) {
+  return compactRenderedQr(renderTerminalQr(value, { quietZone }));
 }
 
 function createLogger(level = "warn") {
@@ -151,7 +162,7 @@ export class WhatsAppRuntime {
     this.closing = false;
     this.state = {
       status: "idle",
-      hasCreds: existsSync(credsFile),
+      hasCreds: hasUsableStoredCreds(authDir),
       user: null,
       lastQrAt: null,
       currentQrText: null,
@@ -167,7 +178,7 @@ export class WhatsAppRuntime {
   }
 
   hasSavedCreds() {
-    return existsSync(credsFile);
+    return hasUsableStoredCreds(authDir);
   }
 
   summary() {
@@ -194,11 +205,20 @@ export class WhatsAppRuntime {
 
   async #startInternal({ printQrToTerminal }) {
     await this.initialize();
+    const repairedAuthBackupDir = await repairCorruptAuthState(authDir);
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
     const { version } = await fetchLatestWaWebVersion();
 
     this.state.status = "connecting";
     this.state.hasCreds = this.hasSavedCreds();
+    if (repairedAuthBackupDir) {
+      this.logger.warn(
+        {
+          backupDir: repairedAuthBackupDir
+        },
+        "repaired corrupt WhatsApp auth state before starting a fresh link flow"
+      );
+    }
 
     const socket = makeWASocket({
       auth: state,
@@ -599,6 +619,6 @@ export class WhatsAppRuntime {
   }
 
   #renderQr(value) {
-    return renderCompactQr(value);
+    return renderTerminalQr(value);
   }
 }

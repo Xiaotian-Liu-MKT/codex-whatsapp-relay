@@ -18,12 +18,14 @@ import {
   parseVoiceReplyCommandPayload,
   normalizeVoiceCommandText,
   parseIncomingCommand,
+  planFinalReplyDelivery,
   parseVoiceTranscript,
   requiresTextConfirmationForVoicePrompt,
   resolveProjectSelection,
   resolveRunVoiceReply,
   resolveThreadSelection,
   sanitizeReplyTextForWhatsApp,
+  shouldIgnoreInboundMessage,
   shouldSplitCompoundVoiceControlRequest
 } from "./controller-bridge.mjs";
 import { normalizePermissionLevel } from "./controller-permissions.mjs";
@@ -54,6 +56,10 @@ test("parseIncomingCommand accepts shortcut aliases for admin commands", () => {
     prompt: "what time is it?"
   });
   assert.deepEqual(parseIncomingCommand("/ls", true), { type: "sessions", payload: "" });
+  assert.deepEqual(parseIncomingCommand("/more alpha-app", true), {
+    type: "more",
+    payload: "alpha-app"
+  });
   assert.deepEqual(parseIncomingCommand("/session 2", true), {
     type: "connect",
     payload: "2"
@@ -116,6 +122,32 @@ test("parseIncomingCommand recognizes the natural-language new project session s
       target: "alpha app inside code directory"
     }
   );
+});
+
+test("shouldIgnoreInboundMessage ignores WhatsApp protocol messages", () => {
+  assert.equal(shouldIgnoreInboundMessage("protocolMessage"), true);
+  assert.equal(shouldIgnoreInboundMessage("conversation"), false);
+  assert.equal(shouldIgnoreInboundMessage("extendedTextMessage"), false);
+});
+
+test("planFinalReplyDelivery defers very long replies and keeps continuation state", () => {
+  const bodyText = Array.from({ length: 8 }, (_, index) =>
+    [`Section ${index + 1}`, "x".repeat(1200)].join("\n")
+  ).join("\n\n");
+
+  const planned = planFinalReplyDelivery({
+    introText: "Background result from alpha-checkin session 019d39a1 completed.",
+    bodyText,
+    continuationCommand: "/more alpha-checkin"
+  });
+
+  assert.equal(planned.mode, "deferred");
+  assert.equal(planned.messages.length, 1);
+  assert.ok(planned.pendingLongReply);
+  assert.ok(planned.pendingLongReply.parts.length > 3);
+  assert.equal(planned.pendingLongReply.nextIndex, 1);
+  assert.match(planned.messages[0], /Part 1\//);
+  assert.match(planned.messages[0], /Reply \/more alpha-checkin for the next part\./);
 });
 
 test("parseApprovalTargetPayload keeps multi-word project targets intact", () => {
@@ -700,6 +732,123 @@ test("handleVoiceReplyCommand updates active runs without requiring /stop", asyn
     assert.equal(
       replies[0],
       "Voice replies are now on for this chat at 2x. Active runs will use the new voice setting."
+    );
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("handleMoreCommand sends the next deferred part for the active project and clears it when done", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-bridge-more-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+
+  try {
+    const stateStore = new ControllerStateStore(filePath);
+    await stateStore.load();
+    await stateStore.upsertSession("123", {
+      phoneKey: "123",
+      activeProject: "alpha-app",
+      remoteJid: "123@s.whatsapp.net",
+      label: "Test User",
+      projects: {
+        "alpha-app": {
+          pendingLongReply: {
+            parts: ["First deferred chunk", "Second deferred chunk"],
+            nextIndex: 1
+          }
+        }
+      }
+    });
+
+    const bridge = new WhatsAppControllerBridge({
+      runtime: {},
+      configStore: {
+        data: {
+          defaultProject: "alpha-app",
+          permissionLevel: "workspace-write",
+          projects: [{ alias: "alpha-app", workspace: "/workspace/alpha-app" }]
+        }
+      },
+      stateStore
+    });
+
+    const replies = [];
+    bridge.sendReply = async (_remoteJid, text) => {
+      replies.push(text);
+    };
+
+    await bridge.handleMoreCommand({
+      phoneKey: "123",
+      remoteJid: "123@s.whatsapp.net",
+      payload: "",
+      label: "Test User"
+    });
+
+    assert.match(replies[0], /Part 2\/2/);
+    assert.match(replies[0], /Second deferred chunk/);
+    assert.equal(stateStore.getSession("123").projects["alpha-app"].pendingLongReply, null);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("handleMoreCommand keeps background project continuations addressable by alias", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-bridge-more-bg-test-"));
+  const filePath = path.join(tempDir, "controller-state.json");
+
+  try {
+    const stateStore = new ControllerStateStore(filePath);
+    await stateStore.load();
+    await stateStore.upsertSession("123", {
+      phoneKey: "123",
+      activeProject: "beta-app",
+      remoteJid: "123@s.whatsapp.net",
+      label: "Test User",
+      projects: {
+        "alpha-app": {
+          pendingLongReply: {
+            parts: ["Alpha chunk 1", "Alpha chunk 2", "Alpha chunk 3"],
+            nextIndex: 1
+          }
+        },
+        "beta-app": {
+          threadId: "thread-beta"
+        }
+      }
+    });
+
+    const bridge = new WhatsAppControllerBridge({
+      runtime: {},
+      configStore: {
+        data: {
+          defaultProject: "beta-app",
+          permissionLevel: "workspace-write",
+          projects: [
+            { alias: "alpha-app", workspace: "/workspace/alpha-app" },
+            { alias: "beta-app", workspace: "/workspace/beta-app" }
+          ]
+        }
+      },
+      stateStore
+    });
+
+    const replies = [];
+    bridge.sendReply = async (_remoteJid, text) => {
+      replies.push(text);
+    };
+
+    await bridge.handleMoreCommand({
+      phoneKey: "123",
+      remoteJid: "123@s.whatsapp.net",
+      payload: "alpha-app",
+      label: "Test User"
+    });
+
+    assert.match(replies[0], /Part 2\/3/);
+    assert.match(replies[0], /Reply \/more alpha-app for part 3\/3\./);
+    assert.equal(
+      stateStore.getSession("123").projects["alpha-app"].pendingLongReply.nextIndex,
+      2
     );
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });

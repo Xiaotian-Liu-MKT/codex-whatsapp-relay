@@ -50,6 +50,32 @@ function normalizeQueuedPromptList(value) {
     : [];
 }
 
+function normalizePendingLongReply(value = null) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const parts = Array.isArray(value.parts)
+    ? value.parts
+        .map((part) => (typeof part === "string" ? part.trim() : ""))
+        .filter(Boolean)
+    : [];
+  if (!parts.length) {
+    return null;
+  }
+
+  const rawNextIndex = Number(value.nextIndex);
+  const nextIndex = Number.isInteger(rawNextIndex)
+    ? Math.min(Math.max(rawNextIndex, 0), parts.length)
+    : 0;
+
+  return {
+    parts,
+    nextIndex,
+    updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : null
+  };
+}
+
 export function defaultProjectSession() {
   return {
     threadId: null,
@@ -68,7 +94,8 @@ export function defaultProjectSession() {
     lastThreadChoicesAt: null,
     lastErrorAt: null,
     lastError: null,
-    queuedPrompts: []
+    queuedPrompts: [],
+    pendingLongReply: null
   };
 }
 
@@ -84,7 +111,8 @@ export function defaultChatSession(phoneKey = null) {
     },
     btw: {
       lastUsedAt: null,
-      queuedPrompts: []
+      queuedPrompts: [],
+      pendingLongReply: null
     },
     lastInboundAt: null,
     lastInboundText: null,
@@ -122,7 +150,8 @@ function normalizeProjectSession(value = {}) {
     ...defaultProjectSession(),
     ...value,
     lastThreadChoices: Array.isArray(value.lastThreadChoices) ? value.lastThreadChoices : [],
-    queuedPrompts: normalizeQueuedPromptList(value.queuedPrompts)
+    queuedPrompts: normalizeQueuedPromptList(value.queuedPrompts),
+    pendingLongReply: normalizePendingLongReply(value.pendingLongReply)
   };
 }
 
@@ -171,7 +200,8 @@ function normalizeChatSession(value = {}, phoneKey = null) {
     btw: {
       ...defaultChatSession().btw,
       ...(value.btw ?? {}),
-      queuedPrompts: normalizeQueuedPromptList(value.btw?.queuedPrompts)
+      queuedPrompts: normalizeQueuedPromptList(value.btw?.queuedPrompts),
+      pendingLongReply: normalizePendingLongReply(value.btw?.pendingLongReply)
     }
   };
 }

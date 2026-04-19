@@ -41,6 +41,8 @@ import {
 } from "./voice-replier.mjs";
 
 const MAX_WHATSAPP_MESSAGE = 3500;
+const FINAL_REPLY_INLINE_PART_LIMIT = 3;
+const FINAL_REPLY_FRAME_RESERVE = 320;
 const HEARTBEAT_MS = 30_000;
 const RECENT_MESSAGE_LIMIT = 500;
 const OUTBOX_POLL_MS = 1_000;
@@ -62,6 +64,10 @@ function invalidControllerCommandError(message) {
   error.code = "ERR_CONTROLLER_COMMAND_INVALID";
   error.retryable = false;
   return error;
+}
+
+export function shouldIgnoreInboundMessage(messageType) {
+  return messageType === "protocolMessage";
 }
 
 const COMMAND_ALIASES = new Map([
@@ -98,6 +104,7 @@ const COMMAND_ALIASES = new Map([
   ["sessions", "sessions"],
   ["threads", "sessions"],
   ["ls", "sessions"],
+  ["more", "more"],
   ["connect", "connect"],
   ["resume", "connect"],
   ["session", "connect"],
@@ -131,34 +138,96 @@ function normalizeTimestamp(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function splitMessage(text, limit = MAX_WHATSAPP_MESSAGE) {
-  const trimmed = text.trim();
+function utf8ByteLength(text) {
+  return Buffer.byteLength(String(text ?? ""), "utf8");
+}
+
+function maxUtf8IndexWithinLimit(text, limit) {
+  let index = 0;
+  let bytes = 0;
+
+  while (index < text.length) {
+    const codePoint = text.codePointAt(index);
+    const char = String.fromCodePoint(codePoint);
+    const nextIndex = index + char.length;
+    const nextBytes = bytes + utf8ByteLength(char);
+    if (nextBytes > limit) {
+      break;
+    }
+
+    index = nextIndex;
+    bytes = nextBytes;
+  }
+
+  return index;
+}
+
+function resolveSplitPoint(text, limit) {
+  const maxIndex = maxUtf8IndexWithinLimit(text, limit);
+  if (maxIndex >= text.length) {
+    return {
+      chunkEnd: text.length,
+      restStart: text.length
+    };
+  }
+
+  const head = text.slice(0, maxIndex);
+  const minimumPreferredBytes = Math.floor(limit * 0.4);
+  for (const separator of ["\n\n", "\n", " "]) {
+    const separatorIndex = head.lastIndexOf(separator);
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const preferredChunk = head.slice(0, separatorIndex).trimEnd();
+    if (!preferredChunk) {
+      continue;
+    }
+
+    if (utf8ByteLength(preferredChunk) >= minimumPreferredBytes || separator === " ") {
+      return {
+        chunkEnd: separatorIndex,
+        restStart: separatorIndex + separator.length
+      };
+    }
+  }
+
+  return {
+    chunkEnd: maxIndex,
+    restStart: maxIndex
+  };
+}
+
+export function splitMessage(text, limit = MAX_WHATSAPP_MESSAGE) {
+  const trimmed = String(text ?? "").trim();
   if (!trimmed) {
     return [];
   }
 
-  if (trimmed.length <= limit) {
+  if (utf8ByteLength(trimmed) <= limit) {
     return [trimmed];
   }
 
   const parts = [];
   let remaining = trimmed;
 
-  while (remaining.length > limit) {
-    let index = remaining.lastIndexOf("\n", limit);
-    if (index < limit / 2) {
-      index = remaining.lastIndexOf(" ", limit);
-    }
-    if (index < limit / 2) {
-      index = limit;
+  while (remaining) {
+    if (utf8ByteLength(remaining) <= limit) {
+      parts.push(remaining);
+      break;
     }
 
-    parts.push(remaining.slice(0, index).trim());
-    remaining = remaining.slice(index).trim();
-  }
+    const { chunkEnd, restStart } = resolveSplitPoint(remaining, limit);
+    const chunk = remaining.slice(0, chunkEnd).trimEnd();
+    if (!chunk) {
+      const fallbackEnd = Math.max(1, maxUtf8IndexWithinLimit(remaining, limit));
+      parts.push(remaining.slice(0, fallbackEnd).trimEnd());
+      remaining = remaining.slice(fallbackEnd).trimStart();
+      continue;
+    }
 
-  if (remaining) {
-    parts.push(remaining);
+    parts.push(chunk);
+    remaining = remaining.slice(restStart).trimStart();
   }
 
   return parts;
@@ -340,6 +409,7 @@ function helpText() {
     "/deny or /d [project|btw] -> decline the pending action",
     "/cancel or /q [project|btw] -> cancel the pending action",
     "/stop or /x [project|btw] -> stop an in-flight Codex run",
+    "/more [project|btw] -> continue a deferred long reply",
     "/help or /h -> show this help",
     "",
     "Any other text in this direct chat continues the active project's current Codex session.",
@@ -672,6 +742,8 @@ export function parseIncomingCommand(text, captureAllDirectMessages) {
         return { type: "voiceReplySettings", payload };
       case "sessions":
         return { type: "sessions", payload };
+      case "more":
+        return { type: "more", payload };
       case "connect":
         return { type: "connect", payload };
       default:
@@ -842,6 +914,105 @@ function joinMessageSections(...sections) {
   return sections
     .filter((section) => typeof section === "string" && section.trim())
     .join("\n\n");
+}
+
+function buildReplyPartHeading(partIndex, totalParts) {
+  return totalParts > 1 ? `Part ${partIndex}/${totalParts}` : null;
+}
+
+function formatDeferredReplyIntro(totalParts, continuationCommand) {
+  return `Long reply split into ${totalParts} parts. Sending 1/${totalParts} now. Reply ${continuationCommand} for the next part.`;
+}
+
+function formatDeferredReplyFooter(partIndex, totalParts, continuationCommand) {
+  return partIndex < totalParts
+    ? `Reply ${continuationCommand} for part ${partIndex + 1}/${totalParts}.`
+    : null;
+}
+
+function buildFinalReplyChunk({
+  introText = "",
+  bodyPart,
+  partIndex,
+  totalParts,
+  footerText = null
+}) {
+  return joinMessageSections(
+    introText,
+    buildReplyPartHeading(partIndex, totalParts),
+    bodyPart,
+    footerText
+  );
+}
+
+export function planFinalReplyDelivery({
+  introText = "",
+  bodyText = "",
+  continuationCommand = "/more"
+} = {}) {
+  const sanitizedIntro = sanitizeReplyTextForWhatsApp(introText);
+  const sanitizedBody = sanitizeReplyTextForWhatsApp(bodyText);
+  const combined = joinMessageSections(sanitizedIntro, sanitizedBody);
+  if (!combined) {
+    return {
+      mode: "empty",
+      messages: [],
+      pendingLongReply: null
+    };
+  }
+
+  if (utf8ByteLength(combined) <= MAX_WHATSAPP_MESSAGE) {
+    return {
+      mode: "single",
+      messages: [combined],
+      pendingLongReply: null
+    };
+  }
+
+  const chunkLimit = Math.max(512, MAX_WHATSAPP_MESSAGE - FINAL_REPLY_FRAME_RESERVE);
+  const bodyParts = splitMessage(sanitizedBody, chunkLimit);
+  if (!bodyParts.length) {
+    return {
+      mode: "single",
+      messages: [sanitizedIntro],
+      pendingLongReply: null
+    };
+  }
+
+  if (bodyParts.length <= FINAL_REPLY_INLINE_PART_LIMIT) {
+    return {
+      mode: "inline",
+      messages: bodyParts.map((bodyPart, index) =>
+        buildFinalReplyChunk({
+          introText: index === 0 ? sanitizedIntro : "",
+          bodyPart,
+          partIndex: index + 1,
+          totalParts: bodyParts.length
+        })
+      ),
+      pendingLongReply: null
+    };
+  }
+
+  return {
+    mode: "deferred",
+    messages: [
+      buildFinalReplyChunk({
+        introText: joinMessageSections(
+          sanitizedIntro,
+          formatDeferredReplyIntro(bodyParts.length, continuationCommand)
+        ),
+        bodyPart: bodyParts[0],
+        partIndex: 1,
+        totalParts: bodyParts.length
+      })
+    ],
+    pendingLongReply: {
+      parts: bodyParts,
+      nextIndex: 1,
+      updatedAt: new Date().toISOString()
+    }
+  };
 }
 
 export function requiresTextConfirmationForVoicePrompt(prompt) {
@@ -1439,6 +1610,190 @@ export class WhatsAppControllerBridge {
       chatPatch,
       projectPatch: defaultProjectSession()
     });
+  }
+
+  buildMoreCommand(phoneKey, scopeType, projectAlias = null) {
+    if (scopeType === "btw") {
+      return "/more btw";
+    }
+
+    const activeProjectAlias = this.getActiveProject(phoneKey).alias;
+    return projectAlias && projectAlias !== activeProjectAlias
+      ? `/more ${projectAlias}`
+      : "/more";
+  }
+
+  async setPendingLongReplyState({
+    phoneKey,
+    remoteJid,
+    label,
+    scopeType,
+    projectAlias = null,
+    pendingLongReply = null
+  }) {
+    if (scopeType === "btw") {
+      const chatSession = this.getChatSession(phoneKey);
+      await this.upsertChatSession(phoneKey, {
+        phoneKey,
+        remoteJid,
+        label,
+        btw: {
+          ...(chatSession.btw ?? {}),
+          pendingLongReply
+        }
+      });
+      return;
+    }
+
+    await this.upsertProjectSession(phoneKey, projectAlias, {
+      chatPatch: {
+        phoneKey,
+        remoteJid,
+        label
+      },
+      projectPatch: {
+        pendingLongReply
+      }
+    });
+  }
+
+  resolvePendingLongReplyTarget(phoneKey, payload = "") {
+    const chatSession = this.getChatSession(phoneKey);
+    const activeProject = this.getActiveProject(phoneKey);
+    const spec = String(payload ?? "").trim();
+    const configuredProjects = this.configStore.data.projects ?? [];
+
+    const projectTarget = (project) => ({
+      scopeType: "project",
+      project,
+      pendingLongReply: chatSession.projects?.[project.alias]?.pendingLongReply ?? null
+    });
+
+    if (!spec) {
+      const activeTarget = projectTarget(activeProject);
+      if (activeTarget.pendingLongReply) {
+        return activeTarget;
+      }
+
+      if (chatSession.btw?.pendingLongReply) {
+        return {
+          scopeType: "btw",
+          project: null,
+          pendingLongReply: chatSession.btw.pendingLongReply
+        };
+      }
+
+      const pendingProjects = configuredProjects
+        .map((project) => projectTarget(project))
+        .filter((target) => target.pendingLongReply);
+      if (pendingProjects.length === 1) {
+        return pendingProjects[0];
+      }
+
+      if (pendingProjects.length > 1) {
+        return {
+          error: `More than one deferred reply is waiting. Use /more <project|btw>: ${pendingProjects
+            .map((target) => target.project.alias)
+            .join(", ")}${chatSession.btw?.pendingLongReply ? ", btw" : ""}`
+        };
+      }
+
+      return {
+        error: "No deferred long reply is waiting for this chat."
+      };
+    }
+
+    if (normalizeVoiceCommandText(spec) === "btw") {
+      return chatSession.btw?.pendingLongReply
+        ? {
+            scopeType: "btw",
+            project: null,
+            pendingLongReply: chatSession.btw.pendingLongReply
+          }
+        : {
+            error: "No deferred btw reply is waiting."
+          };
+    }
+
+    const shortcutSelection = resolveProjectSelection(configuredProjects, spec);
+    const explicitSelection =
+      shortcutSelection.match
+      ?? resolveConfiguredProjectSelection(this.configStore.data, spec).match;
+    if (!explicitSelection) {
+      const configuredSelection = resolveConfiguredProjectSelection(this.configStore.data, spec);
+      if (configuredSelection.candidates?.length) {
+        return {
+          error: renderAmbiguousProjectSelectionMessage(spec, configuredSelection.candidates)
+        };
+      }
+      return {
+        error: `Project "${spec}" is not configured yet.`
+      };
+    }
+
+    const target = projectTarget(explicitSelection);
+    return target.pendingLongReply
+      ? target
+      : {
+          error: `No deferred long reply is waiting for ${explicitSelection.alias}.`
+        };
+  }
+
+  async sendPlannedFinalReply({
+    phoneKey,
+    remoteJid,
+    label,
+    scopeType,
+    projectAlias = null,
+    introText = "",
+    bodyText = ""
+  }) {
+    const continuationCommand = this.buildMoreCommand(phoneKey, scopeType, projectAlias);
+    const planned = planFinalReplyDelivery({
+      introText,
+      bodyText,
+      continuationCommand
+    });
+    if (planned.mode === "empty") {
+      return;
+    }
+
+    if (planned.mode === "deferred") {
+      const pending = planned.pendingLongReply;
+      await this.setPendingLongReplyState({
+        phoneKey,
+        remoteJid,
+        label,
+        scopeType,
+        projectAlias,
+        pendingLongReply: {
+          ...pending,
+          nextIndex: 0
+        }
+      });
+      await this.sendReply(remoteJid, planned.messages[0]);
+      await this.setPendingLongReplyState({
+        phoneKey,
+        remoteJid,
+        label,
+        scopeType,
+        projectAlias,
+        pendingLongReply: pending
+      });
+      return;
+    }
+
+    await this.setPendingLongReplyState({
+      phoneKey,
+      remoteJid,
+      label,
+      scopeType,
+      projectAlias,
+      pendingLongReply: null
+    });
+    for (const message of planned.messages) {
+      await this.sendReply(remoteJid, message);
+    }
   }
 
   projectRun(phoneKey, projectAlias) {
@@ -2108,6 +2463,10 @@ export class WhatsAppControllerBridge {
     }
 
     const messageType = extractMessageType(message.message);
+    if (shouldIgnoreInboundMessage(messageType)) {
+      return;
+    }
+
     const audioMessage = extractAudioMessage(message.message);
     const extractedText = extractMessageText(message.message).trim();
     let text = audioMessage ? "" : extractedText;
@@ -2442,6 +2801,14 @@ export class WhatsAppControllerBridge {
       case "sessions":
         await this.sendThreadList(phoneKey, remoteJid, command.payload);
         return;
+      case "more":
+        await this.handleMoreCommand({
+          phoneKey,
+          remoteJid,
+          payload: command.payload,
+          label
+        });
+        return;
       case "connect":
         await this.connectToThread({
           phoneKey,
@@ -2492,6 +2859,65 @@ export class WhatsAppControllerBridge {
       default:
         return;
     }
+  }
+
+  async handleMoreCommand({ phoneKey, remoteJid, payload, label }) {
+    const resolved = this.resolvePendingLongReplyTarget(phoneKey, payload);
+    if (resolved.error) {
+      await this.sendReply(remoteJid, resolved.error);
+      return;
+    }
+
+    const pending = resolved.pendingLongReply;
+    const totalParts = pending?.parts?.length ?? 0;
+    const nextIndex = pending?.nextIndex ?? 0;
+    if (!totalParts || nextIndex >= totalParts) {
+      await this.setPendingLongReplyState({
+        phoneKey,
+        remoteJid,
+        label,
+        scopeType: resolved.scopeType,
+        projectAlias: resolved.project?.alias ?? null,
+        pendingLongReply: null
+      });
+      await this.sendReply(
+        remoteJid,
+        resolved.scopeType === "btw"
+          ? "No deferred btw reply is waiting."
+          : `No deferred long reply is waiting for ${resolved.project.alias}.`
+      );
+      return;
+    }
+
+    const continuationCommand = this.buildMoreCommand(
+      phoneKey,
+      resolved.scopeType,
+      resolved.project?.alias ?? null
+    );
+    const partIndex = nextIndex + 1;
+    const message = buildFinalReplyChunk({
+      bodyPart: pending.parts[nextIndex],
+      partIndex,
+      totalParts,
+      footerText: formatDeferredReplyFooter(partIndex, totalParts, continuationCommand)
+    });
+
+    await this.sendReply(remoteJid, message);
+    await this.setPendingLongReplyState({
+      phoneKey,
+      remoteJid,
+      label,
+      scopeType: resolved.scopeType,
+      projectAlias: resolved.project?.alias ?? null,
+      pendingLongReply:
+        partIndex < totalParts
+          ? {
+              ...pending,
+              nextIndex: partIndex,
+              updatedAt: new Date().toISOString()
+            }
+          : null
+    });
   }
 
   async sendProjectList(phoneKey, remoteJid) {
@@ -3439,6 +3865,7 @@ export class WhatsAppControllerBridge {
         projectPatch: {
           permissionLevel,
           pendingPermissionConfirmation: null,
+          pendingLongReply: null,
           lastPromptAt: new Date().toISOString(),
           lastPromptText: prompt,
           lastPromptVoiceReply: activeVoiceReply.enabled ? activeVoiceReply : null,
@@ -3452,7 +3879,8 @@ export class WhatsAppControllerBridge {
         label,
         btw: {
           ...(chatSession.btw ?? {}),
-          lastUsedAt: new Date().toISOString()
+          lastUsedAt: new Date().toISOString(),
+          pendingLongReply: null
         }
       });
     }
@@ -3514,14 +3942,18 @@ export class WhatsAppControllerBridge {
       if (currentVoiceReply.enabled) {
         try {
           const activeProjectNow = this.getActiveProject(phoneKey);
+          const finalReplyIntro =
+            scopeType === "project" && activeProjectNow.alias !== project.alias
+              ? formatProjectRunReplyPrefix({
+                  projectAlias: project.alias,
+                  threadId: result.threadId,
+                  activeProjectAlias: activeProjectNow.alias
+                })
+              : "";
           if (scopeType === "project" && activeProjectNow.alias !== project.alias) {
             await this.sendReply(
               remoteJid,
-              formatProjectRunReplyPrefix({
-                projectAlias: project.alias,
-                threadId: result.threadId,
-                activeProjectAlias: activeProjectNow.alias
-              })
+              finalReplyIntro
             );
           }
           await this.sendVoiceReply(
@@ -3542,19 +3974,22 @@ export class WhatsAppControllerBridge {
             remoteJid,
             `Failed to generate the voice reply locally with ${DEFAULT_TTS_PROVIDER}: ${error.message}`
           );
-          await this.sendReply(
+          await this.sendPlannedFinalReply({
+            phoneKey,
             remoteJid,
-            scopeType === "btw"
-              ? replyText
-              : joinMessageSections(
-                  formatProjectRunReplyPrefix({
+            label,
+            scopeType,
+            projectAlias: project.alias,
+            introText:
+              scopeType === "btw"
+                ? ""
+                : formatProjectRunReplyPrefix({
                     projectAlias: project.alias,
                     threadId: result.threadId,
                     activeProjectAlias: this.getActiveProject(phoneKey).alias
                   }),
-                  replyText
-                )
-          );
+            bodyText: replyText
+          });
         }
         await this.runNextQueuedPrompt({
           phoneKey,
@@ -3566,19 +4001,22 @@ export class WhatsAppControllerBridge {
         return;
       }
 
-      await this.sendReply(
+      await this.sendPlannedFinalReply({
+        phoneKey,
         remoteJid,
-        scopeType === "btw"
-          ? replyText
-          : joinMessageSections(
-              formatProjectRunReplyPrefix({
+        label,
+        scopeType,
+        projectAlias: project.alias,
+        introText:
+          scopeType === "btw"
+            ? ""
+            : formatProjectRunReplyPrefix({
                 projectAlias: project.alias,
                 threadId: result.threadId,
                 activeProjectAlias: this.getActiveProject(phoneKey).alias
               }),
-              replyText
-            )
-      );
+        bodyText: replyText
+      });
       await this.runNextQueuedPrompt({
         phoneKey,
         remoteJid,
