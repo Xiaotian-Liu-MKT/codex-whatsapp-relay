@@ -53,6 +53,22 @@ const DANGER_CONFIRMATION_WINDOW_MS = 60_000;
 const ACTIVE_RUN_PREVIEW_LIMIT = 160;
 const VOICE_REPLY_SPEEDS = new Set(["1x", "2x"]);
 const LOGGED_OUT_RECOVERY_MS = 60_000;
+const THREAD_LABEL_LIMIT = 56;
+const THREAD_PREVIEW_LIMIT = 72;
+const THREAD_TIMESTAMP_MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec"
+];
 const VOICE_REPLY_LANGUAGE_TAG =
   /^\s*\[\[\s*reply_language\s*:\s*([a-z]{2,3}(?:[-_][a-z0-9]{2,8})?)\s*\]\]\s*/i;
 const MARKDOWN_LINK_PATTERN = /\[([^\]]+)\]\(([^)]+)\)/g;
@@ -317,20 +333,100 @@ function buildThreadName({ label, phoneKey, projectAlias = null, scopeType = "pr
   return `WhatsApp: ${normalized}${scopeSuffix}`.slice(0, 120);
 }
 
-function formatThreadTimestamp(value) {
-  if (!value) {
+function compactThreadText(value, limit) {
+  const normalized = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
     return null;
   }
 
-  const timestamp = value > 1_000_000_000_000 ? value : value * 1000;
-  return new Date(timestamp).toISOString();
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, Math.max(0, limit - 3)).trimEnd()}...`;
 }
 
-function sanitizeThreadPreview(value) {
-  return String(value ?? "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 80);
+function parseThreadTimestamp(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? value : null;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+      const numeric = Number(trimmed);
+      if (Number.isFinite(numeric)) {
+        const milliseconds = Math.abs(numeric) > 1_000_000_000_000 ? numeric : numeric * 1000;
+        const parsed = new Date(milliseconds);
+        return Number.isFinite(parsed.getTime()) ? parsed : null;
+      }
+    }
+
+    const parsed = new Date(trimmed);
+    return Number.isFinite(parsed.getTime()) ? parsed : null;
+  }
+
+  const numeric = normalizeTimestamp(value);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+
+  const milliseconds = Math.abs(numeric) > 1_000_000_000_000 ? numeric : numeric * 1000;
+  const parsed = new Date(milliseconds);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function sameUtcDate(left, right) {
+  return (
+    left.getUTCFullYear() === right.getUTCFullYear() &&
+    left.getUTCMonth() === right.getUTCMonth() &&
+    left.getUTCDate() === right.getUTCDate()
+  );
+}
+
+function formatUtcTime(date) {
+  return `${String(date.getUTCHours()).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")}Z`;
+}
+
+export function formatThreadTimestamp(value, { now = new Date() } = {}) {
+  const parsed = parseThreadTimestamp(value);
+  if (!parsed) {
+    return null;
+  }
+
+  const current = now instanceof Date && Number.isFinite(now.getTime()) ? now : new Date();
+  const timeText = formatUtcTime(parsed);
+  if (sameUtcDate(parsed, current)) {
+    return timeText;
+  }
+
+  if (parsed.getUTCFullYear() === current.getUTCFullYear()) {
+    return `${THREAD_TIMESTAMP_MONTHS[parsed.getUTCMonth()]} ${parsed.getUTCDate()} ${timeText}`;
+  }
+
+  return [
+    parsed.getUTCFullYear(),
+    String(parsed.getUTCMonth() + 1).padStart(2, "0"),
+    String(parsed.getUTCDate()).padStart(2, "0")
+  ].join("-") + ` ${timeText}`;
+}
+
+function sanitizeThreadLabel(value) {
+  return compactThreadText(value, THREAD_LABEL_LIMIT);
+}
+
+export function sanitizeThreadPreview(value) {
+  return compactThreadText(value, THREAD_PREVIEW_LIMIT);
 }
 
 function formatProjectStatus(project, projectSession, activeRun, permissionLevel, { activeProjectAlias } = {}) {
@@ -1166,21 +1262,57 @@ function summarizeThread(thread, currentThreadId) {
   return summarizeThreadChoice(thread, currentThreadId);
 }
 
-function summarizeThreadChoice(thread, currentThreadId, index = null) {
+export function summarizeThreadChoice(thread, currentThreadId, index = null, { now = new Date() } = {}) {
   const preview = sanitizeThreadPreview(thread.preview);
-  const shortcut = Number.isInteger(index)
-    ? ` ${formatThreadShortcut(index)}`
-    : "";
+  const shortId = shortThreadId(thread.id);
+  const label = sanitizeThreadLabel(thread.name) ?? shortId;
+  const prefix = Number.isInteger(index) ? `${formatThreadShortcut(index)}:` : "-";
+  const isCurrent = thread.id === currentThreadId;
+  const firstLineParts = [prefix, isCurrent ? "[current]" : null, label].filter(Boolean);
+  const metadata = [];
+  if (label !== shortId) {
+    metadata.push(shortId);
+  }
+
+  const timestamp = formatThreadTimestamp(thread.updatedAt, { now });
+  if (timestamp) {
+    metadata.push(timestamp);
+  }
+
+  const firstLine = metadata.length
+    ? `${firstLineParts.join(" ")} · ${metadata.join(" · ")}`
+    : firstLineParts.join(" ");
+  return [firstLine, preview ? `-> ${preview}` : null].filter(Boolean).join("\n");
+}
+
+function formatThreadShortcutSummary(count) {
+  if (!count) {
+    return "/session <n>";
+  }
+
+  return Array.from({ length: Math.min(count, 3) }, (_, index) =>
+    formatThreadShortcut(index + 1)
+  ).join(" ");
+}
+
+export function renderThreadListReply({
+  projectAlias,
+  threads,
+  currentThreadId = null,
+  now = new Date()
+}) {
+  const sessionBlocks = threads.map((thread, index) =>
+    summarizeThreadChoice(thread, currentThreadId, index + 1, { now })
+  );
+
   return [
-    `${Number.isInteger(index) ? `${index}.` : "-"} ${shortThreadId(thread.id)}${
-      thread.id === currentThreadId ? " (current)" : ""
-    }${shortcut}`,
-    thread.name ? `  name=${thread.name}` : null,
-    preview ? `  preview=${preview}` : null,
-    thread.updatedAt ? `  updated_at=${formatThreadTimestamp(thread.updatedAt)}` : null
-  ]
-    .filter(Boolean)
-    .join("\n");
+    `Recent Codex sessions for ${projectAlias}:`,
+    "",
+    sessionBlocks.join("\n\n"),
+    "",
+    `Switch: ${formatThreadShortcutSummary(threads.length)}, /session <n>, or /connect <id>.`,
+    `Project shortcut: /session ${projectAlias} <n>.`
+  ].join("\n");
 }
 
 export function resolveThreadSelection(threads, token, session = {}) {
@@ -3196,17 +3328,14 @@ export class WhatsAppControllerBridge {
       }
     });
 
-    const lines = [
-      `Recent Codex sessions for ${project.alias}:`,
-      "",
-      ...threads.map((thread, index) =>
-        summarizeThreadChoice(thread, session.threadId ?? null, index + 1)
-      ),
-      "",
-      "Use /1, /2, ..., /session <number>, or /connect <thread-id-prefix> to switch this chat.",
-      `You can also jump directly with /session ${project.alias} <number>.`
-    ];
-    await this.sendReply(remoteJid, lines.join("\n"));
+    await this.sendReply(
+      remoteJid,
+      renderThreadListReply({
+        projectAlias: project.alias,
+        threads,
+        currentThreadId: session.threadId ?? null
+      })
+    );
   }
 
   async connectToThread({ phoneKey, remoteJid, payload, label }) {

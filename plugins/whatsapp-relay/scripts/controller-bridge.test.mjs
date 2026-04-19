@@ -8,10 +8,12 @@ import {
   applyRunLifecycleEvent,
   buildVoiceReplyTextCompanion,
   buildDangerFullAccessConfirmationMessage,
+  formatThreadTimestamp,
   formatProjectRunReplyPrefix,
   buildVoiceReplyPrompt,
   extractVoiceReplyEnvelope,
   extractOneShotVoiceReplyRequest,
+  renderThreadListReply,
   WhatsAppControllerBridge,
   parseImplicitProjectCommand,
   parseApprovalTargetPayload,
@@ -25,6 +27,7 @@ import {
   resolveRunVoiceReply,
   resolveThreadSelection,
   sanitizeReplyTextForWhatsApp,
+  summarizeThreadChoice,
   shouldIgnoreInboundMessage,
   shouldSplitCompoundVoiceControlRequest
 } from "./controller-bridge.mjs";
@@ -184,6 +187,83 @@ test("resolveThreadSelection honors numbered shortcuts from the last listed sess
   assert.equal(resolveThreadSelection(threads, "1", session).match?.id, "thread-other");
   assert.equal(resolveThreadSelection(threads, "2", {}).match?.id, "thread-other");
   assert.equal(resolveThreadSelection(threads, "3", {}).requestedShortcut, 3);
+});
+
+test("formatThreadTimestamp renders compact UTC timestamps for same-day and older sessions", () => {
+  const now = new Date("2026-04-19T09:30:00.000Z");
+
+  assert.equal(formatThreadTimestamp("2026-04-19T05:36:11.000Z", { now }), "05:36Z");
+  assert.equal(
+    formatThreadTimestamp(new Date("2026-04-19T05:11:15.000Z").getTime() / 1000, {
+      now
+    }),
+    "05:11Z"
+  );
+  assert.equal(formatThreadTimestamp("2026-04-17T12:19:09.000Z", { now }), "Apr 17 12:19Z");
+});
+
+test("summarizeThreadChoice renders a compact two-line session entry", () => {
+  const summary = summarizeThreadChoice(
+    {
+      id: "019da0499f34abcd",
+      name: "WhatsApp: self [home]",
+      preview:
+        "This preview should stay on one line even when it is much longer than the compact list wants to show inside WhatsApp.",
+      updatedAt: "2026-04-19T05:51:46.000Z"
+    },
+    "019da0499f34abcd",
+    3,
+    {
+      now: new Date("2026-04-19T09:30:00.000Z")
+    }
+  );
+
+  assert.equal(summary.split("\n").length, 2);
+  assert.match(
+    summary,
+    /^\/3: \[current\] WhatsApp: self \[home\] · 019da049 · 05:51Z$/m
+  );
+  assert.match(summary, /^-> This preview should stay on one line even when it is much longer than\.\.\.$/m);
+});
+
+test("renderThreadListReply keeps /ls output compact and shortcut-first", () => {
+  const reply = renderThreadListReply({
+    projectAlias: "home",
+    currentThreadId: "019da0499f34abcd",
+    now: new Date("2026-04-19T09:30:00.000Z"),
+    threads: [
+      {
+        id: "019da0499f34abcd",
+        name: "WhatsApp: self [home]",
+        preview: "你看一下我电脑上链接 codex 和 whatsapp 的那个工具",
+        updatedAt: "2026-04-19T05:51:46.000Z"
+      },
+      {
+        id: "019da42811112222",
+        preview: "Short follow-up preview",
+        updatedAt: "2026-04-19T05:36:11.000Z"
+      }
+    ]
+  });
+
+  assert.equal(
+    reply,
+    [
+      "Recent Codex sessions for home:",
+      "",
+      "/1: [current] WhatsApp: self [home] · 019da049 · 05:51Z",
+      "-> 你看一下我电脑上链接 codex 和 whatsapp 的那个工具",
+      "",
+      "/2: 019da428 · 05:36Z",
+      "-> Short follow-up preview",
+      "",
+      "Switch: /1 /2, /session <n>, or /connect <id>.",
+      "Project shortcut: /session home <n>."
+    ].join("\n")
+  );
+  assert.equal(reply.includes("name="), false);
+  assert.equal(reply.includes("preview="), false);
+  assert.equal(reply.includes("updated_at="), false);
 });
 
 test("resolveProjectSelection honors numbered configured project shortcuts", () => {
